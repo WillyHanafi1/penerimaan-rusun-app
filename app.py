@@ -753,7 +753,7 @@ def calculate_denda(df_with_extract):
             }
             
             lantai_mapping = {
-                '01': 'I', '02': 'II', '03': 'III', '04': 'IV'
+                '01': 'I', '02': 'II', '03': 'III', '04': 'IV', '05': 'V'
             }
             
             return {
@@ -1029,7 +1029,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
             gedung_formatted = str(gedung) if pd.notna(gedung) else ''
             
             # Format Lantai dengan angka romawi
-            lantai_romawi = {'1': 'I', '2': 'II', '3': 'III', '4': 'IV', 'I': 'I', 'II': 'II', 'III': 'III', 'IV': 'IV'}
+            lantai_romawi = {'1': 'I', '2': 'II', '3': 'III', '4': 'IV', '5': 'V', 'I': 'I', 'II': 'II', 'III': 'III', 'IV': 'IV', 'V': 'V'}
             lantai_formatted = lantai_romawi.get(str(lantai), str(lantai)) if pd.notna(lantai) else ''
             
             # Format No Hunian dengan leading zero
