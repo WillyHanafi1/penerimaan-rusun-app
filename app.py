@@ -510,8 +510,11 @@ def filter_incomplete_data(df_setortunai, df_non_rusun):
     # Cek data dengan tahun yang tidak didukung (selain 2024 dan 2025)
     unsupported_year_mask = ~df_setortunai['Tahun'].astype(str).isin(['2024', '2025'])
     
-    # Gabungkan kedua filter: data tidak lengkap ATAU tahun tidak didukung
-    to_move_mask = incomplete_mask | unsupported_year_mask
+    # Cek data dengan Credit Transaction > 600.000
+    high_credit_mask = df_setortunai['Credit Transaction'].apply(to_numeric_safe) > 600000
+    
+    # Gabungkan ketiga filter: data tidak lengkap ATAU tahun tidak didukung ATAU credit transaction > 600.000
+    to_move_mask = incomplete_mask | unsupported_year_mask | high_credit_mask
     
     # Pindahkan data tidak lengkap dan tahun tidak didukung ke non-rusun
     df_setortunai_to_move = df_setortunai[to_move_mask].copy()
@@ -533,6 +536,11 @@ def filter_incomplete_data(df_setortunai, df_non_rusun):
         # Cek tahun yang tidak didukung
         if str(row['Tahun']) not in ['2024', '2025'] and str(row['Tahun']) != '':
             reasons.append(f'Tahun {row["Tahun"]} tidak didukung (hanya 2024-2025)')
+        
+        # Cek Credit Transaction > 600.000
+        credit_amount = to_numeric_safe(row.get('Credit Transaction', 0))
+        if credit_amount > 600000:
+            reasons.append(f'Credit Transaction {credit_amount:,.0f} > 600.000 (perlu cek manual)')
         
         # Gabungkan alasan
         if missing_fields:
@@ -807,18 +815,18 @@ def input_to_excel_master(df_final, master_files):
     def get_month_columns(bulan):
         """Mengembalikan kolom-kolom target berdasarkan bulan."""
         month_mapping = {
-            'Januari': {'posting_date_cols': ['P', 'Q'], 'denda_col': 'M', 'color_range': ['I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R']},
-            'Februari': {'posting_date_cols': ['Z', 'AA'], 'denda_col': 'W', 'color_range': ['S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AA', 'AB']},
-            'Maret': {'posting_date_cols': ['AJ', 'AK'], 'denda_col': 'AG', 'color_range': ['AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ', 'AK', 'AL']},
-            'April': {'posting_date_cols': ['AT', 'AU'], 'denda_col': 'AQ', 'color_range': ['AM', 'AN', 'AO', 'AP', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AV']},
-            'Mei': {'posting_date_cols': ['BD', 'BE'], 'denda_col': 'BA', 'color_range': ['AW', 'AX', 'AY', 'AZ', 'BA', 'BB', 'BC', 'BD', 'BE', 'BF']},
-            'Juni': {'posting_date_cols': ['BN', 'BO'], 'denda_col': 'BK', 'color_range': ['BG', 'BH', 'BI', 'BJ', 'BK', 'BL', 'BM', 'BN', 'BO', 'BP']},
-            'Juli': {'posting_date_cols': ['BX', 'BY'], 'denda_col': 'BU', 'color_range': ['BQ', 'BR', 'BS', 'BT', 'BU', 'BV', 'BW', 'BX', 'BY', 'BZ']},
-            'Agustus': {'posting_date_cols': ['CH', 'CI'], 'denda_col': 'CE', 'color_range': ['CA', 'CB', 'CC', 'CD', 'CE', 'CF', 'CG', 'CH', 'CI', 'CJ']},
-            'September': {'posting_date_cols': ['CR', 'CS'], 'denda_col': 'CO', 'color_range': ['CK', 'CL', 'CM', 'CN', 'CO', 'CP', 'CQ', 'CR', 'CS', 'CT']},
-            'Oktober': {'posting_date_cols': ['DB', 'DC'], 'denda_col': 'CY', 'color_range': ['CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DA', 'DB', 'DC', 'DD']},
-            'November': {'posting_date_cols': ['DL', 'DM'], 'denda_col': 'DI', 'color_range': ['DE', 'DF', 'DG', 'DH', 'DI', 'DJ', 'DK', 'DL', 'DM', 'DN']},
-            'Desember': {'posting_date_cols': ['DV', 'DW'], 'denda_col': 'DS', 'color_range': ['DO', 'DP', 'DQ', 'DR', 'DS', 'DT', 'DU', 'DV', 'DW', 'DX']}
+            'Januari': {'posting_date_cols': ['P', 'Q'], 'denda_col': 'M', 'tambahan_col': 'R', 'color_range': ['I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R']},
+            'Februari': {'posting_date_cols': ['Z', 'AA'], 'denda_col': 'W', 'tambahan_col': 'AB', 'color_range': ['S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AA', 'AB']},
+            'Maret': {'posting_date_cols': ['AJ', 'AK'], 'denda_col': 'AG', 'tambahan_col': 'AL', 'color_range': ['AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ', 'AK', 'AL']},
+            'April': {'posting_date_cols': ['AT', 'AU'], 'denda_col': 'AQ', 'tambahan_col': 'AV', 'color_range': ['AM', 'AN', 'AO', 'AP', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AV']},
+            'Mei': {'posting_date_cols': ['BD', 'BE'], 'denda_col': 'BA', 'tambahan_col': 'BF', 'color_range': ['AW', 'AX', 'AY', 'AZ', 'BA', 'BB', 'BC', 'BD', 'BE', 'BF']},
+            'Juni': {'posting_date_cols': ['BN', 'BO'], 'denda_col': 'BK', 'tambahan_col': 'BP', 'color_range': ['BG', 'BH', 'BI', 'BJ', 'BK', 'BL', 'BM', 'BN', 'BO', 'BP']},
+            'Juli': {'posting_date_cols': ['BX', 'BY'], 'denda_col': 'BU', 'tambahan_col': 'BZ', 'color_range': ['BQ', 'BR', 'BS', 'BT', 'BU', 'BV', 'BW', 'BX', 'BY', 'BZ']},
+            'Agustus': {'posting_date_cols': ['CH', 'CI'], 'denda_col': 'CE', 'tambahan_col': 'CJ', 'color_range': ['CA', 'CB', 'CC', 'CD', 'CE', 'CF', 'CG', 'CH', 'CI', 'CJ']},
+            'September': {'posting_date_cols': ['CR', 'CS'], 'denda_col': 'CO', 'tambahan_col': 'CT', 'color_range': ['CK', 'CL', 'CM', 'CN', 'CO', 'CP', 'CQ', 'CR', 'CS', 'CT']},
+            'Oktober': {'posting_date_cols': ['DB', 'DC'], 'denda_col': 'CY', 'tambahan_col': 'DD', 'color_range': ['CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DA', 'DB', 'DC', 'DD']},
+            'November': {'posting_date_cols': ['DL', 'DM'], 'denda_col': 'DI', 'tambahan_col': 'DN', 'color_range': ['DE', 'DF', 'DG', 'DH', 'DI', 'DJ', 'DK', 'DL', 'DM', 'DN']},
+            'Desember': {'posting_date_cols': ['DV', 'DW'], 'denda_col': 'DS', 'tambahan_col': 'DX', 'color_range': ['DO', 'DP', 'DQ', 'DR', 'DS', 'DT', 'DU', 'DV', 'DW', 'DX']}
         }
         return month_mapping.get(bulan)
 
@@ -851,6 +859,26 @@ def input_to_excel_master(df_final, master_files):
         backup_path = f"{name}_BACKUP_{timestamp}{ext}"
         shutil.copy2(original_file, backup_path)
         return backup_path
+
+    def convert_date_format(date_str):
+        """Mengkonversi format tanggal dari dd/mm/yyyy ke mm/dd/yyyy"""
+        try:
+            if pd.isna(date_str) or date_str == '' or date_str == 'nan':
+                return date_str
+            
+            date_str = str(date_str).strip()
+            
+            # Cek jika format dd/mm/yyyy
+            if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', date_str):
+                # Parse tanggal dalam format dd/mm/yyyy
+                date_obj = datetime.strptime(date_str, '%d/%m/%Y')
+                # Return dalam format mm/dd/yyyy
+                return date_obj.strftime('%m/%d/%Y')
+            
+            # Jika bukan format yang diharapkan, return as is
+            return date_str
+        except:
+            return date_str
 
     def input_data_to_excel_v2_silent_optimized(df_data):
         """Versi yang dioptimasi: Input data ke Excel dengan minimal I/O operations."""
@@ -888,6 +916,9 @@ def input_to_excel_master(df_final, master_files):
                 for _, row in group_data.iterrows():
                     kode, bulan, p_date, denda = str(row['Kode_8_Digit']), row['Bulan'], row['Posting Date'], row['Denda']
                     
+                    # Konversi format tanggal dari dd/mm/yyyy ke mm/dd/yyyy
+                    p_date_converted = convert_date_format(p_date)
+                    
                     d1, d2, d3, d4 = parse_kode_8_digit(kode)
                     sheet_name = get_sheet_name(d1) if d1 else None
                     month_cols = get_month_columns(bulan)
@@ -910,8 +941,8 @@ def input_to_excel_master(df_final, master_files):
                         results['failed_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f'Kombinasi kode tidak ditemukan'})
                         continue
                     
-                    pdc1, pdc2, dc = month_cols['posting_date_cols'][0], month_cols['posting_date_cols'][1], month_cols['denda_col']
-                    c1_addr, c2_addr, c3_addr = f'{pdc1}{target_row}', f'{pdc2}{target_row}', f'{dc}{target_row}'
+                    pdc1, pdc2, dc, tc = month_cols['posting_date_cols'][0], month_cols['posting_date_cols'][1], month_cols['denda_col'], month_cols['tambahan_col']
+                    c1_addr, c2_addr, c3_addr, c4_addr = f'{pdc1}{target_row}', f'{pdc2}{target_row}', f'{dc}{target_row}', f'{tc}{target_row}'
                     
                     if is_cell_filled(worksheet, c1_addr) or is_cell_filled(worksheet, c2_addr) or is_cell_filled(worksheet, c3_addr):
                         results['skipped'] += 1
@@ -920,9 +951,10 @@ def input_to_excel_master(df_final, master_files):
                     
                     try:
                         # Perform all changes in memory
-                        worksheet[c1_addr] = p_date
-                        worksheet[c2_addr] = p_date
+                        worksheet[c1_addr] = p_date_converted  # Format mm/dd/yyyy
+                        worksheet[c2_addr] = p_date_converted  # Format mm/dd/yyyy
                         worksheet[c3_addr] = denda
+                        worksheet[c4_addr] = 1  # Tambahan angka 1
                         
                         # Apply formatting in memory
                         from openpyxl.styles import PatternFill
