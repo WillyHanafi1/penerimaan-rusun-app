@@ -160,10 +160,10 @@ def process_pdf(pdf_path):
         
         # PEMBERSIHAN DAN FORMAT KOLOM TANGGAL
         
-        # Fungsi untuk memformat tanggal menjadi dd/mm/yyyy
+        # Fungsi untuk memformat tanggal menjadi mm/dd/yyyy
         def format_date_column(value):
             """
-            Memformat kolom tanggal menjadi format dd/mm/yyyy
+            Memformat kolom tanggal menjadi format mm/dd/yyyy
             Menangani berbagai format input tanggal termasuk format DDMmmYYYY
             """
             if pd.isna(value) or value == '' or value == 'nan':
@@ -171,9 +171,16 @@ def process_pdf(pdf_path):
             
             value_str = str(value).strip()
             
-            # Jika sudah dalam format yang benar, kembalikan
-            if re.match(r'^\d{2}/\d{2}/\d{4}$', value_str):
-                return value_str
+            # Jika sudah dalam format mm/dd/yyyy, kembalikan
+            if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', value_str):
+                # Parse dan validasi format yang ada
+                try:
+                    # Coba parse sebagai mm/dd/yyyy
+                    parsed_date = datetime.strptime(value_str, '%m/%d/%Y')
+                    return parsed_date.strftime('%m/%d/%Y')
+                except ValueError:
+                    # Jika gagal, mungkin format dd/mm/yyyy, lanjut ke parsing lain
+                    pass
             
             # Handle format DDMmmYYYY (seperti 03Jun2025)
             month_mapping = {
@@ -190,7 +197,7 @@ def process_pdf(pdf_path):
                 day, month_str, year = match.groups()
                 month_num = month_mapping.get(month_str)
                 if month_num:
-                    return f"{day}/{month_num}/{year}"
+                    return f"{month_num}/{day}/{year}"  # Format mm/dd/yyyy
             
             # Coba parse berbagai format tanggal
             date_formats = [
@@ -203,14 +210,16 @@ def process_pdf(pdf_path):
                 '%d.%m.%Y',    # 13.06.2025
                 '%d%b%Y',      # 13Jun2025
                 '%d-%b-%Y',    # 13-Jun-2025
+                '%m/%d/%Y',    # 06/13/2025 (format US)
+                '%m-%d-%Y',    # 06-13-2025 (format US)
             ]
             
             for fmt in date_formats:
                 try:
                     # Parse tanggal dengan format yang dicoba
                     parsed_date = datetime.strptime(value_str, fmt)
-                    # Return dalam format dd/mm/yyyy
-                    return parsed_date.strftime('%d/%m/%Y')
+                    # Return dalam format mm/dd/yyyy
+                    return parsed_date.strftime('%m/%d/%Y')
                 except ValueError:
                     continue
             
@@ -230,7 +239,7 @@ def process_pdf(pdf_path):
                     if len(groups[2]) == 4:  # Format dengan tahun 4 digit
                         if len(groups[0]) == 4:  # yyyy/mm/dd
                             year, month, day = groups[0], groups[1], groups[2]
-                        else:  # dd/mm/yyyy
+                        else:  # dd/mm/yyyy (asumsi format Indonesia)
                             day, month, year = groups[0], groups[1], groups[2]
                     else:  # Format dengan tahun 2 digit
                         day, month, year = groups[0], groups[1], groups[2]
@@ -248,7 +257,7 @@ def process_pdf(pdf_path):
                     # Validasi tanggal
                     try:
                         datetime.strptime(f"{day}/{month}/{year}", '%d/%m/%Y')
-                        return f"{day}/{month}/{year}"
+                        return f"{month}/{day}/{year}"  # Return format mm/dd/yyyy
                     except ValueError:
                         continue
             
@@ -265,6 +274,7 @@ def process_pdf(pdf_path):
             
             if matching_cols:
                 for col in matching_cols:
+                    print(f"📅 Memformat kolom tanggal: {col} ke format mm/dd/yyyy")
                     # Terapkan format tanggal
                     df_bank[col] = df_bank[col].apply(format_date_column)
         
