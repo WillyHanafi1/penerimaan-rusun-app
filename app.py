@@ -67,6 +67,25 @@ def to_numeric_safe(value):
     except:
         return 0
 
+def convert_to_first_of_month_date(bulan, tahun):
+    """Mengonversi string bulan dan tahun menjadi objek datetime tanggal 1."""
+    try:
+        if pd.isna(bulan) or pd.isna(tahun) or bulan == '' or tahun == '':
+            return None # Mengembalikan nilai kosong yang dikenali pandas
+        
+        month_map = {
+            'Januari': 1, 'Februari': 2, 'Maret': 3, 'April': 4, 'Mei': 5, 'Juni': 6,
+            'Juli': 7, 'Agustus': 8, 'September': 9, 'Oktober': 10, 'November': 11, 'Desember': 12
+        }
+        month_num = month_map.get(str(bulan))
+        
+        if month_num and str(tahun).isdigit():
+            # Membuat objek tanggal asli: tanggal 1, di bulan & tahun yang sesuai
+            return datetime(int(tahun), month_num, 1)
+        return None
+    except:
+        return None
+
 # Fungsi pemrosesan PDF (dari notebook)
 def process_pdf(pdf_path):
     """Mengekstrak data dari PDF Bank Statement (sama persis dengan test3.ipynb cell 1)"""
@@ -983,6 +1002,16 @@ def input_to_excel_master(df_final, master_files):
                         results['failed'] += 1
                         results['failed_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f'Error input: {str(e)}'})
 
+                # Hide columns A, B, C, D in all relevant sheets before saving
+                for sheet_name in ['CIGUGUR', 'MELONG', 'LG ']:
+                    if sheet_name in workbook.sheetnames:
+                        ws = workbook[sheet_name]
+                        # Hide columns A, B, C, D
+                        ws.column_dimensions['A'].hidden = True
+                        ws.column_dimensions['B'].hidden = True
+                        ws.column_dimensions['C'].hidden = True
+                        ws.column_dimensions['D'].hidden = True
+                
                 # OPTIMIZATION: Save workbook ONCE after all changes are done
                 workbook.save(backup_path)
                 
@@ -1128,7 +1157,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         'Denda': None,
         'Jumlah': (df_kasda.get('Sewa Hunian', 0).apply(to_numeric_safe) + 
                   df_kasda.get('Sewa Lahan Lantai 1', 0).apply(to_numeric_safe)),
-        'Bulan': df_kasda.apply(lambda x: format_month_mmmyy(x.get('Bulan', ''), x.get('Tahun', '')), axis=1)
+        'Bulan': df_kasda.apply(lambda x: convert_to_first_of_month_date(x.get('Bulan'), x.get('Tahun')), axis=1)
     })
     
     # Data untuk sheet Denda
@@ -1154,7 +1183,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         'Tanggal Perjanjian': df_denda.get('Tanggal Perjanjian Sewa', '').apply(format_date_ddmmmyy),
         'Denda': df_denda.get('Denda', 0).apply(to_numeric_safe),
         'Jumlah': df_denda.get('Denda', 0).apply(to_numeric_safe),
-        'Bulan': df_denda.apply(lambda x: format_month_mmmyy(x.get('Bulan', ''), x.get('Tahun', '')), axis=1)
+        'Bulan': df_denda.apply(lambda x: convert_to_first_of_month_date(x.get('Bulan'), x.get('Tahun')), axis=1)
     })
     
     # Konversi kolom numeric di df_export_status
@@ -1191,38 +1220,74 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         # Format Excel dengan numeric format
         workbook = writer.book
         
-        # Format semua sheet dengan format numeric
-        for sheet_name in workbook.sheetnames:
-            worksheet = workbook[sheet_name]
-            
-            if sheet_name == 'Status_Input':
-                numeric_cols = ['Credit Transaction', 'Balance', 'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda']
-                df_ref = df_export_status
-            elif sheet_name == 'Cek Manual':
-                numeric_cols = money_columns_status
-                df_ref = df_non_rusun
-            elif sheet_name == 'Kasda':
-                numeric_cols = ['Sewa Hunian', 'Sewa Lantai 1', 'Jumlah']
-                df_ref = df_kasda_export
-            elif sheet_name == 'Denda':
-                numeric_cols = ['Denda', 'Jumlah']
-                df_ref = df_denda_export
-            else:
-                continue
-            
-            # Terapkan format angka
-            for col_name in numeric_cols:
-                if col_name in df_ref.columns:
-                    col_idx = df_ref.columns.get_loc(col_name) + 1
-                    col_letter = get_column_letter(col_idx)
-                    
-                    for row in range(2, len(df_ref) + 2):
-                        cell = worksheet[f'{col_letter}{row}']
-                        if cell.value is not None:
-                            cell.number_format = '#,##0'
-            
-            # Terapkan penyesuaian lebar kolom otomatis
-            auto_adjust_column_width(worksheet)
+        # 1. Definisikan format yang diinginkan
+        money_format = '#,##0'
+        date_format = 'DD-MM-YYYY'
+        month_year_format = 'MMM-YY'  # BARU: Format tampilan Bulan-Tahun
+
+        # 2. Definisikan kolom-kolom tanggal
+        date_cols = ['Tanggal Setor', 'Tanggal Kasda', 'Tanggal Perjanjian']
+        
+        # 3. Definisikan kolom-kolom uang per sheet
+        money_cols = {
+            'Status_Input': ['Credit Transaction', 'Balance', 'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda'],
+            'Cek Manual': money_columns_status,
+            'Kasda': ['Sewa Hunian', 'Sewa Lantai 1', 'Jumlah'],
+            'Denda': ['Denda', 'Jumlah']
+        }
+        
+        # 4. Mapping sheet ke dataframe
+        sheets_to_write = {
+            'Status_Input': df_export_status,
+            'Cek Manual': df_non_rusun if len(df_non_rusun) > 0 else pd.DataFrame(),
+            'Kasda': df_kasda_export,
+            'Denda': df_denda_export if len(df_denda_export) > 0 else pd.DataFrame()
+        }
+        
+        # Loop melalui setiap sheet untuk menerapkan format
+        for sheet_name, df_to_format in sheets_to_write.items():
+            if sheet_name in workbook.sheetnames and not df_to_format.empty:
+                worksheet = workbook[sheet_name]
+                
+                # Terapkan format angka untuk kolom uang
+                sheet_money_cols = money_cols.get(sheet_name, [])
+                for col_name in sheet_money_cols:
+                    if col_name in df_to_format.columns:
+                        col_idx = df_to_format.columns.get_loc(col_name) + 1
+                        col_letter = get_column_letter(col_idx)
+                        
+                        for row in range(2, len(df_to_format) + 2):
+                            cell = worksheet[f'{col_letter}{row}']
+                            if cell.value is not None:
+                                cell.number_format = money_format
+                
+                # Terapkan format tanggal untuk kolom tanggal
+                for col_name in date_cols:
+                    if col_name in df_to_format.columns:
+                        col_idx = df_to_format.columns.get_loc(col_name) + 1
+                        col_letter = get_column_letter(col_idx)
+                        
+                        for row in range(2, len(df_to_format) + 2):
+                            cell = worksheet[f'{col_letter}{row}']
+                            if cell.value is not None:
+                                cell.number_format = date_format
+
+                # --- PERUBAHAN DI SINI ---
+                # Terapkan format mmm-yy untuk kolom 'Bulan' di sheet Kasda dan Denda
+                if sheet_name in ['Kasda', 'Denda']:
+                    if 'Bulan' in df_to_format.columns:
+                        col_idx = df_to_format.columns.get_loc('Bulan') + 1
+                        col_letter = get_column_letter(col_idx)
+                        
+                        for row in range(2, len(df_to_format) + 2):
+                            cell = worksheet[f'{col_letter}{row}']
+                            if cell.value is not None:
+                                # Terapkan format tampilan, bukan format teks
+                                cell.number_format = month_year_format
+                # --- AKHIR PERUBAHAN ---
+
+                # Terapkan penyesuaian lebar kolom otomatis
+                auto_adjust_column_width(worksheet)
     
     return export_filename
 
