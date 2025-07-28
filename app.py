@@ -871,24 +871,15 @@ def input_to_excel_master(df_final, master_files):
         return backup_path
 
     def convert_date_format(date_str):
-        """Mengkonversi format tanggal dari dd/mm/yyyy ke mm/dd/yyyy"""
+        """Mengkonversi format tanggal string ke objek datetime."""
         try:
             if pd.isna(date_str) or date_str == '' or date_str == 'nan':
-                return date_str
+                return None
             
-            date_str = str(date_str).strip()
-            
-            # Cek jika format dd/mm/yyyy
-            if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', date_str):
-                # Parse tanggal dalam format dd/mm/yyyy
-                date_obj = datetime.strptime(date_str, '%d/%m/%Y')
-                # Return dalam format mm/dd/yyyy
-                return date_obj.strftime('%m/%d/%Y')
-            
-            # Jika bukan format yang diharapkan, return as is
-            return date_str
-        except:
-            return date_str
+            # Coba parse format dd/mm/yyyy atau mm/dd/yyyy
+            return pd.to_datetime(str(date_str)).to_pydatetime()
+        except (ValueError, TypeError):
+            return None # Kembalikan None jika parsing gagal
 
     def input_data_to_excel_v2_silent_optimized(df_data):
         """Versi yang dioptimasi: Input data ke Excel dengan minimal I/O operations."""
@@ -926,7 +917,7 @@ def input_to_excel_master(df_final, master_files):
                 for _, row in group_data.iterrows():
                     kode, bulan, p_date, denda = str(row['Kode_8_Digit']), row['Bulan'], row['Posting Date'], row['Denda']
                     
-                    # Konversi format tanggal dari dd/mm/yyyy ke mm/dd/yyyy
+                    # Konversi format tanggal ke objek datetime
                     p_date_converted = convert_date_format(p_date)
                     
                     d1, d2, d3, d4 = parse_kode_8_digit(kode)
@@ -961,12 +952,26 @@ def input_to_excel_master(df_final, master_files):
                     
                     try:
                         # Perform all changes in memory
-                        worksheet[c1_addr] = p_date_converted  # Format mm/dd/yyyy
-                        worksheet[c2_addr] = p_date_converted  # Format mm/dd/yyyy
+                        
+                        # === PERUBAHAN DI SINI ===
+                        if p_date_converted is not None:
+                            # Tulis objek datetime langsung ke sel
+                            worksheet[c1_addr] = p_date_converted
+                            worksheet[c2_addr] = p_date_converted
+                            
+                            # Terapkan format tanggal DD-MM-YYYY
+                            worksheet[c1_addr].number_format = 'DD/MM/YYYY'
+                            worksheet[c2_addr].number_format = 'DD/MM/YYYY'
+                        else:
+                            # Jika tanggal tidak valid, tulis string aslinya
+                            worksheet[c1_addr] = p_date 
+                            worksheet[c2_addr] = p_date
+                        # === AKHIR PERUBAHAN ===
+                        
                         worksheet[c3_addr] = denda
                         worksheet[c4_addr] = 1  # Tambahan angka 1
                         
-                        # Apply formatting in memory
+                        # Apply formatting in memory (pewarnaan)
                         from openpyxl.styles import PatternFill
                         fill_color = PatternFill(start_color='D8E4BC', end_color='D8E4BC', fill_type='solid')
                         for col in month_cols['color_range']:
