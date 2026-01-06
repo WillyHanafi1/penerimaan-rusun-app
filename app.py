@@ -315,8 +315,11 @@ def process_setortunai(df_bank):
     # Fungsi ekstraksi yang diperbaiki berdasarkan analisis contoh narasi
     def extract_setortunai_only(narasi_text):
         """
-        Fungsi ekstraksi yang diperbaiki untuk menangani pattern NOV25, DES24, dll
-        dan tidak memberikan default bulan/tahun jika tidak ada indikasi yang jelas
+        Fungsi ekstraksi yang diperbaiki untuk menangani berbagai format narasi.
+        Perbaikan: 
+        - Kode 8 digit: cari tanpa word boundary juga untuk handle kode dengan /
+        - Bulan/Tahun: scan seluruh narasi, bukan hanya 40 karakter terakhir
+        - Update tahun: 2025 dan 2026
         """
         if pd.isna(narasi_text) or narasi_text == '' or narasi_text == 'nan':
             return '', '', ''
@@ -327,38 +330,63 @@ def process_setortunai(df_bank):
         if 'SETORTUNAI' not in narasi_str:
             return '', '', ''
         
-        # === KODE 8 DIGIT ===
+        # === KODE 8 DIGIT - DIPERBAIKI ===
+        # PENTING: Kode 8 digit biasanya ada di PERTENGAHAN/AKHIR narasi, bukan di awal
+        # Awal narasi biasanya nomor transaksi bank, bukan kode rusun
         kode_8_digit = ''
         
-        # Cari semua 8 digit dalam narasi dengan pattern yang lebih spesifik
-        # 2 angka awal harus 01, 02, atau 03
-        specific_8_digits = re.findall(r'\b(0[123]\d{6})\b', narasi_str)
-        
-        if specific_8_digits:
-            # Ambil yang pertama ditemukan yang sesuai kriteria
-            kode_8_digit = specific_8_digits[0]
+        # Cari posisi SETORTUNAI dan ambil bagian setelahnya
+        setortunai_pos = narasi_str.find('SETORTUNAI')
+        if setortunai_pos != -1:
+            # Ambil bagian narasi SETELAH kata SETORTUNAI
+            narasi_after_setortunai = narasi_str[setortunai_pos:]
         else:
-            # Fallback: cari semua 8 digit dan filter yang dimulai 01, 02, 03
-            all_8_digits = re.findall(r'\d{8}', narasi_str)
-            
-            for code in all_8_digits:
-                # Filter kode yang valid: dimulai dengan 01, 02, atau 03 dan bukan tahun
-                if (code.startswith(('01', '02', '03')) and 
-                    not code.startswith(('2024', '2025', '2026'))):
+            narasi_after_setortunai = narasi_str
+        
+        # Pattern 1: Cari kode 8 digit SETELAH SETORTUNAI dengan word boundary
+        specific_8_digits = re.findall(r'\b(0[123]\d{6})\b', narasi_after_setortunai)
+        if specific_8_digits:
+            kode_8_digit = specific_8_digits[0]
+        
+        # Pattern 2: Kode 8 digit diikuti / setelah SETORTUNAI
+        if not kode_8_digit:
+            kode_with_slash = re.findall(r'(0[123]\d{6})/', narasi_after_setortunai)
+            if kode_with_slash:
+                kode_8_digit = kode_with_slash[0]
+        
+        # Pattern 3: Kode 8 digit setelah / (format: /01020304) - setelah SETORTUNAI
+        if not kode_8_digit:
+            kode_after_slash = re.findall(r'/(0[123]\d{6})', narasi_after_setortunai)
+            if kode_after_slash:
+                kode_8_digit = kode_after_slash[0]
+        
+        # Pattern 4: Cari kode 8 digit tanpa boundary - setelah SETORTUNAI
+        if not kode_8_digit:
+            all_matches = re.findall(r'(0[123]\d{6})', narasi_after_setortunai)
+            for code in all_matches:
+                if not code.startswith(('2024', '2025', '2026', '2027')):
                     kode_8_digit = code
                     break
         
-        # === ANALISIS 40 HURUF TERAKHIR ===
-        last_40_chars = narasi_str[-40:] if len(narasi_str) >= 40 else narasi_str
+        # Pattern 5: Fallback - cari 8 digit di SELURUH narasi jika masih tidak ada
+        if not kode_8_digit:
+            # Coba cari di setengah akhir narasi dulu
+            half_pos = len(narasi_str) // 2
+            second_half = narasi_str[half_pos:]
+            all_8_digits = re.findall(r'(0[123]\d{6})', second_half)
+            for code in all_8_digits:
+                if not code.startswith(('2024', '2025', '2026', '2027')):
+                    kode_8_digit = code
+                    break
         
-        # === BULAN - PERBAIKAN DENGAN PRIORITAS YANG TEPAT ===
+        # === BULAN - DIPERBAIKI: SCAN SELURUH NARASI ===
         bulan = ''
         
-        # 1. PRIORITAS TERTINGGI: Cari nama bulan lengkap + tahun 4 digit di 40 huruf terakhir
+        # 1. Cari nama bulan lengkap + tahun 4 digit di SELURUH narasi
         full_month_year_4digit = r'(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(20\d{2})'
-        matches = re.findall(full_month_year_4digit, last_40_chars)
+        matches = re.findall(full_month_year_4digit, narasi_str)
         if matches:
-            month_name = matches[-1][0]  # Ambil nama bulan
+            month_name = matches[-1][0]
             month_dict = {
                 'JANUARI': 'Januari', 'FEBRUARI': 'Februari', 'MARET': 'Maret', 'APRIL': 'April',
                 'MEI': 'Mei', 'JUNI': 'Juni', 'JULI': 'Juli', 'AGUSTUS': 'Agustus',
@@ -366,24 +394,36 @@ def process_setortunai(df_bank):
             }
             bulan = month_dict.get(month_name, '')
         
-        # 2. PRIORITAS KEDUA: Cari pattern bulan singkat 3 huruf + tahun 4 digit (FEB2025, JAN2025, DES2024)
+        # 2. Cari pattern BULAN + nama bulan (BULANJUNI, BULANMEI, dll)
         if not bulan:
-            short_month_year_4digit = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|SEP|SEPT|OKT|NOV|DES)(20\d{2})'
-            matches = re.findall(short_month_year_4digit, last_40_chars)
+            bulan_prefix = r'BULAN(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)'
+            matches = re.findall(bulan_prefix, narasi_str)
             if matches:
-                month_abbr = matches[-1][0]  # Ambil yang terakhir ditemukan
+                month_name = matches[-1]
+                month_dict = {
+                    'JANUARI': 'Januari', 'FEBRUARI': 'Februari', 'MARET': 'Maret', 'APRIL': 'April',
+                    'MEI': 'Mei', 'JUNI': 'Juni', 'JULI': 'Juli', 'AGUSTUS': 'Agustus',
+                    'SEPTEMBER': 'September', 'OKTOBER': 'Oktober', 'NOVEMBER': 'November', 'DESEMBER': 'Desember'
+                }
+                bulan = month_dict.get(month_name, '')
+        
+        # 3. Cari pattern bulan singkat + tahun 4 digit (FEB2025, JAN2025, DES2024)
+        if not bulan:
+            short_month_year_4digit = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(20\d{2})'
+            matches = re.findall(short_month_year_4digit, narasi_str)
+            if matches:
+                month_abbr = matches[-1][0]
                 short_month_dict = {
                     'JAN': 'Januari', 'FEB': 'Februari', 'MAR': 'Maret', 'APR': 'April',
-                    'MEI': 'Mei', 'JUN': 'Juni', 'JUL': 'Juli', 'AGS': 'Agustus', 'AGST': 'Agustus',
-                    'SEP': 'September', 'SEPT': 'September', 'OKT': 'Oktober', 'NOV': 'November', 'DES': 'Desember'
+                    'MEI': 'Mei', 'JUN': 'Juni', 'JUL': 'Juli', 'AGS': 'Agustus', 'AGST': 'Agustus', 'AGU': 'Agustus',
+                    'SEP': 'September', 'SEPT': 'September', 'OKT': 'Oktober', 'NOV': 'November', 'NOP': 'November', 'DES': 'Desember'
                 }
                 bulan = short_month_dict.get(month_abbr, '')
         
-        # 3. Jika belum ada, cari nama bulan lengkap di seluruh narasi
+        # 4. Cari nama bulan lengkap di seluruh narasi (standalone)
         if not bulan:
             full_month_names = ['JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI', 
                                'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER']
-            
             for month_name in full_month_names:
                 if month_name in narasi_str:
                     month_dict = {
@@ -394,112 +434,87 @@ def process_setortunai(df_bank):
                     bulan = month_dict[month_name]
                     break
         
-        # 4. Cari pattern bulan singkat + 2 digit tahun (NOV25, DES24, dll)
+        # 5. Cari pattern bulan singkat + 2 digit tahun (NOV25, DES24, JUL25, dll)
         if not bulan:
-            month_year_short = {
+            short_month_dict = {
                 'JAN': 'Januari', 'FEB': 'Februari', 'MAR': 'Maret', 'APR': 'April',
-                'MEI': 'Mei', 'JUN': 'Juni', 'JUL': 'Juli', 'AGS': 'Agustus', 'AGST': 'Agustus',
-                'SEP': 'September', 'SEPT': 'September', 'OKT': 'Oktober', 'NOV': 'November', 'DES': 'Desember'
+                'MEI': 'Mei', 'JUN': 'Juni', 'JUL': 'Juli', 'AGS': 'Agustus', 'AGST': 'Agustus', 'AGU': 'Agustus',
+                'SEP': 'September', 'SEPT': 'September', 'OKT': 'Oktober', 'NOV': 'November', 'NOP': 'November', 'DES': 'Desember'
             }
-            
-            # Pattern: 3 huruf bulan + 2 digit tahun
-            month_pattern = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|SEP|SEPT|OKT|NOV|DES)(\d{2})'
-            matches = re.findall(month_pattern, last_40_chars)
-            
+            # Pattern dinamis: 2 digit tahun (bisa 24, 25, 26, 27, dst)
+            month_pattern = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(\d{2})'
+            matches = re.findall(month_pattern, narasi_str)
             if matches:
-                month_abbr = matches[-1][0]  # Ambil yang terakhir ditemukan
-                bulan = month_year_short.get(month_abbr, '')
+                month_abbr = matches[-1][0]
+                bulan = short_month_dict.get(month_abbr, '')
         
-        # 5. Cari pattern BLN + singkatan (existing)
+        # 6. Cari pattern BLN + singkatan (BLNJAN, BLNFEB, dll)
         if not bulan:
             bln_abbreviations = {
                 'BLNJAN': 'Januari', 'BLNFEB': 'Februari', 'BLNMAR': 'Maret', 'BLNAPR': 'April',
-                'BLNMEI': 'Mei', 'BLNJUN': 'Juni', 'BLNJUL': 'Juli', 'BLNAGST': 'Agustus',
-                'BLNSEPT': 'September', 'BLNOKT': 'Oktober', 'BLNNOV': 'November', 'BLNDES': 'Desember'
+                'BLNMEI': 'Mei', 'BLNJUN': 'Juni', 'BLNJUL': 'Juli', 'BLNAGS': 'Agustus', 'BLNAGST': 'Agustus', 'BLNAGU': 'Agustus',
+                'BLNSEP': 'September', 'BLNSEPT': 'September', 'BLNOKT': 'Oktober', 'BLNNOV': 'November', 'BLNNOP': 'November', 'BLNDES': 'Desember'
             }
-            
             for bln_code, month_name in bln_abbreviations.items():
-                if bln_code in last_40_chars:
+                if bln_code in narasi_str:
                     bulan = month_name
                     break
         
-        # 6. Jika masih belum ada, cari angka bulan di 40 huruf terakhir (tetapi lebih selektif)
-        if not bulan:
-            # Pattern untuk angka bulan dalam konteks yang jelas
-            month_patterns = [
-                r'/(\d{1,2})/',        # /MM/ atau /M/
-                r'/(\d{1,2})\b',       # /MM atau /M (di akhir)
-            ]
-            
-            for pattern in month_patterns:
-                matches = re.findall(pattern, last_40_chars)
-                for match in matches:
-                    if match.isdigit() and 1 <= int(match) <= 12:
-                        month_names = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
-                                     'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
-                        bulan = month_names[int(match)]
-                        break
-                if bulan:
-                    break
-        
-        # === TAHUN - PERBAIKAN DENGAN PRIORITAS YANG TEPAT ===
+        # === TAHUN - DIPERBAIKI: SCAN SELURUH NARASI ===
         tahun = ''
         
-        # 1. PRIORITAS TERTINGGI: Cari format bulan lengkap + tahun 4 digit DULU (MEI2024, DES2024)
+        # 1. Cari format bulan lengkap + tahun 4 digit (JUNI2025, MEI2025)
         full_month_year_4digit = r'(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(20\d{2})'
-        matches = re.findall(full_month_year_4digit, last_40_chars)
+        matches = re.findall(full_month_year_4digit, narasi_str)
         if matches:
-            year_part = matches[-1][-1]  # Ambil bagian tahun (20XX)
+            year_part = matches[-1][-1]
             if year_part.isdigit() and len(year_part) == 4:
                 tahun = year_part
         
-        # 2. PRIORITAS KEDUA: Cari pattern bulan singkat 3 huruf + tahun 4 digit (FEB2025, JAN2025, DES2024)
+        # 2. Cari pattern bulan singkat + tahun 4 digit (FEB2025, JAN2025)
         if not tahun:
-            short_month_year_4digit = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|SEP|SEPT|OKT|NOV|DES)(20\d{2})'
-            matches = re.findall(short_month_year_4digit, last_40_chars)
+            short_month_year_4digit = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(20\d{2})'
+            matches = re.findall(short_month_year_4digit, narasi_str)
             if matches:
-                year_part = matches[-1][-1]  # Ambil bagian tahun (20XX)
+                year_part = matches[-1][-1]
                 if year_part.isdigit() and len(year_part) == 4:
                     tahun = year_part
         
-        # 3. Jika belum ada, cari pattern bulan singkat + 2 digit tahun (NOV25, DES24)
+        # 3. Cari pattern bulan singkat + 2 digit tahun (NOV25, DES26, JUL25)
         if not tahun:
-            month_pattern = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|SEP|SEPT|OKT|NOV|DES)(\d{2})'
-            matches = re.findall(month_pattern, last_40_chars)
-            
-            if matches:
-                year_part = matches[-1][1]  # Ambil bagian tahun
-                if year_part.isdigit() and len(year_part) == 2:
-                    # Konversi 24->2024, 25->2025, dll
-                    if int(year_part) >= 20 and int(year_part) <= 30:  # Range masuk akal
-                        tahun = '20' + year_part
-        
-        # 4. Cari format bulan lengkap + tahun 2 digit (jika ada)
-        if not tahun:
-            full_month_year_2digit = r'(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(\d{2})'
-            matches = re.findall(full_month_year_2digit, last_40_chars)
-            if matches:
-                year_part = matches[-1][-1]  # Ambil bagian tahun
-                if year_part.isdigit() and len(year_part) == 2:
-                    tahun = '20' + year_part
-        
-        # 5. Cari pattern BLN + bulan + tahun
-        if not tahun:
-            bln_pattern = r'BLN(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGST|SEPT|OKT|NOV|DES)(\d{2})'
-            matches = re.findall(bln_pattern, last_40_chars)
+            # Pattern dinamis: 2 digit tahun
+            month_pattern = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(\d{2})'
+            matches = re.findall(month_pattern, narasi_str)
             if matches:
                 year_part = matches[-1][1]
                 if year_part.isdigit() and len(year_part) == 2:
                     tahun = '20' + year_part
         
-        # 6. Cari tahun 4 digit standalone
+        # 4. Cari format bulan lengkap + tahun 2 digit
         if not tahun:
-            year_4_digit = re.findall(r'\b(20[0-9]{2})\b', last_40_chars)
+            # Pattern dinamis: 2 digit tahun
+            full_month_year_2digit = r'(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(\d{2})'
+            matches = re.findall(full_month_year_2digit, narasi_str)
+            if matches:
+                year_part = matches[-1][-1]
+                if year_part.isdigit() and len(year_part) == 2:
+                    tahun = '20' + year_part
+        
+        # 5. Cari pattern BLN + bulan + tahun
+        if not tahun:
+            # Pattern dinamis: 2 digit tahun
+            bln_pattern = r'BLN(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGST|AGU|SEPT|SEP|OKT|NOV|NOP|DES)(\d{2})'
+            matches = re.findall(bln_pattern, narasi_str)
+            if matches:
+                year_part = matches[-1][1]
+                if year_part.isdigit() and len(year_part) == 2:
+                    tahun = '20' + year_part
+        
+        # 6. Cari tahun 4 digit standalone (dinamis)
+        if not tahun:
+            year_4_digit = re.findall(r'\b(20\d{2})\b', narasi_str)
             if year_4_digit:
                 tahun = year_4_digit[-1]
-        
-        # PENTING: Tidak memberikan default tahun jika tidak ada indikasi yang jelas
-        # Berdasarkan analisis, tidak semua narasi memiliki tahun yang valid
         
         return kode_8_digit, bulan, tahun
 
@@ -536,13 +551,16 @@ def filter_incomplete_data(df_setortunai, df_non_rusun):
         (df_setortunai['Tahun'] == '')
     )
     
-    # Cek data dengan tahun yang tidak didukung (selain 2024 dan 2025)
-    unsupported_year_mask = ~df_setortunai['Tahun'].astype(str).isin(['2024', '2025'])
+    # Cek data dengan tahun yang tidak didukung (hanya tahun berjalan dan tahun sebelumnya)
+    current_year = datetime.now().year
+    previous_year = current_year - 1
+    supported_years = [str(previous_year), str(current_year)]
+    unsupported_year_mask = ~df_setortunai['Tahun'].astype(str).isin(supported_years)
     
-    # Cek data dengan Credit Transaction > 600.000
-    high_credit_mask = df_setortunai['Credit Transaction'].apply(to_numeric_safe) > 600000
+    # Cek data dengan Credit Transaction > 700.000
+    high_credit_mask = df_setortunai['Credit Transaction'].apply(to_numeric_safe) > 700000
     
-    # Gabungkan ketiga filter: data tidak lengkap ATAU tahun tidak didukung ATAU credit transaction > 600.000
+    # Gabungkan ketiga filter: data tidak lengkap ATAU tahun tidak didukung ATAU credit transaction > 700.000
     to_move_mask = incomplete_mask | unsupported_year_mask | high_credit_mask
     
     # Pindahkan data tidak lengkap dan tahun tidak didukung ke non-rusun
@@ -562,14 +580,16 @@ def filter_incomplete_data(df_setortunai, df_non_rusun):
         if row['Tahun'] == '':
             missing_fields.append('Tahun')
         
-        # Cek tahun yang tidak didukung
-        if str(row['Tahun']) not in ['2024', '2025'] and str(row['Tahun']) != '':
-            reasons.append(f'Tahun {row["Tahun"]} tidak didukung (hanya 2024-2025)')
+        # Cek tahun yang tidak didukung (dinamis berdasarkan tahun berjalan)
+        current_year = datetime.now().year
+        previous_year = current_year - 1
+        if str(row['Tahun']) not in [str(previous_year), str(current_year)] and str(row['Tahun']) != '':
+            reasons.append(f'Tahun {row["Tahun"]} tidak didukung (hanya {previous_year}-{current_year})')
         
-        # Cek Credit Transaction > 600.000
+        # Cek Credit Transaction > 700.000
         credit_amount = to_numeric_safe(row.get('Credit Transaction', 0))
-        if credit_amount > 600000:
-            reasons.append(f'Credit Transaction {credit_amount:,.0f} > 600.000 (perlu cek manual)')
+        if credit_amount > 700000:
+            reasons.append(f'Credit Transaction {credit_amount:,.0f} > 700.000 (perlu cek manual)')
         
         # Gabungkan alasan
         if missing_fields:
