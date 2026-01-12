@@ -929,12 +929,8 @@ def input_to_excel_master(df_final, master_files):
             if not tahun: 
                 continue
                 
-            # Cari file master berdasarkan tahun
-            excel_file = None
-            if str(tahun) == '2024' and '2024' in master_files:
-                excel_file = master_files['2024']
-            elif str(tahun) == '2025' and '2025' in master_files:
-                excel_file = master_files['2025']
+            # Cari file master berdasarkan tahun (dinamis - tidak perlu hardcode tahun)
+            excel_file = master_files.get(str(tahun))
             
             if not excel_file or not os.path.exists(excel_file):
                 results['errors'].append(f"File tidak ditemukan untuk tahun {tahun}")
@@ -1426,24 +1422,29 @@ def main():
         
         with col2:
             st.markdown("#### 📊 Master Excel")
-            master_2024 = st.file_uploader(
-                "Master Excel 2024", 
+            
+            # Dinamis berdasarkan tahun berjalan
+            current_year = datetime.now().year
+            previous_year = current_year - 1
+            
+            master_prev = st.file_uploader(
+                f"Master Excel {previous_year}", 
                 type=["xlsx"], 
-                key="master_2024",
-                help="File Excel master untuk data tahun 2024"
+                key=f"master_{previous_year}",
+                help=f"File Excel master untuk data tahun {previous_year}"
             )
             
-            master_2025 = st.file_uploader(
-                "Master Excel 2025", 
+            master_curr = st.file_uploader(
+                f"Master Excel {current_year}", 
                 type=["xlsx"], 
-                key="master_2025",
-                help="File Excel master untuk data tahun 2025"
+                key=f"master_{current_year}",
+                help=f"File Excel master untuk data tahun {current_year}"
             )
             
-            if master_2024:
-                st.success(f"✅ 2024: {master_2024.name}")
-            if master_2025:
-                st.success(f"✅ 2025: {master_2025.name}")
+            if master_prev:
+                st.success(f"✅ {previous_year}: {master_prev.name}")
+            if master_curr:
+                st.success(f"✅ {current_year}: {master_curr.name}")
         
         st.markdown("---")
         
@@ -1468,12 +1469,12 @@ def main():
                     temp_pdf = save_uploadedfile_temp(bank_file, "bank_files")
                     
                     master_files = {}
-                    if master_2024:
-                        temp_master_2024 = save_uploadedfile_temp(master_2024, "Master Data")
-                        master_files['2024'] = temp_master_2024
-                    if master_2025:
-                        temp_master_2025 = save_uploadedfile_temp(master_2025, "Master Data")
-                        master_files['2025'] = temp_master_2025
+                    if master_prev:
+                        temp_master_prev = save_uploadedfile_temp(master_prev, "Master Data")
+                        master_files[str(previous_year)] = temp_master_prev
+                    if master_curr:
+                        temp_master_curr = save_uploadedfile_temp(master_curr, "Master Data")
+                        master_files[str(current_year)] = temp_master_curr
                     
                     # Step 2: Proses PDF
                     status_text.info("🔄 **Langkah 2/6:** Mengekstrak data dari PDF Bank Statement...")
