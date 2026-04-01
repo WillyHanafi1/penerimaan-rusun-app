@@ -133,8 +133,8 @@ def process_pdf(pdf_path):
             for col in narasi_columns:
                 # Hapus semua \n dan \r dari kolom narasi
                 df_bank[col] = df_bank[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', ' ', regex=False)
-                # Bersihkan juga spasi berlebih
-                df_bank[col] = df_bank[col].str.replace(r'\s+', '', regex=True).str.strip()
+                # Bersihkan spasi berlebih tapi sisihkan satu spasi di antara kata
+                df_bank[col] = df_bank[col].str.replace(r'\s+', ' ', regex=True).str.strip()
         else:
             # Membersihkan semua kolom string dari karakter newline
             for col in df_bank.columns:
@@ -303,218 +303,140 @@ def process_pdf(pdf_path):
 
 def process_setortunai(df_bank):
     """Memproses data SETORTUNAI dari dataframe bank (sama persis dengan test3.ipynb cell 2)"""
-    # Pisahkan data berdasarkan kata SETORTUNAI
-    df_bank['Has_SETORTUNAI'] = df_bank['Narasi'].str.upper().str.contains('SETORTUNAI', na=False)
+    
+    # FIX 1: Deteksi kolom narasi secara fleksibel (tidak asumsi nama pasti 'Narasi')
+    narasi_col = None
+    for col in df_bank.columns:
+        if 'narasi' in str(col).lower():
+            narasi_col = col
+            break
+    
+    if narasi_col is None:
+        # Fallback: tidak ada kolom narasi — kembalikan semua sebagai non-rusun
+        empty = df_bank.copy()
+        for c in ['Kode_8_Digit', 'Bulan', 'Tahun']:
+            empty[c] = ''
+        return pd.DataFrame(columns=empty.columns), empty
+    
+    # Rename agar kode di bawah bisa tetap pakai 'Narasi'
+    if narasi_col != 'Narasi':
+        df_bank = df_bank.rename(columns={narasi_col: 'Narasi'})
+    
+    # Pisahkan data berdasarkan kata SETOR TUNAI (handle variasi spasi)
+    df_bank['Narasi_Clean'] = df_bank[narasi_col].astype(str).str.upper().str.replace(' ', '', regex=False)
+    df_bank['Has_SETORTUNAI'] = df_bank['Narasi_Clean'].str.contains('SETORTUNAI', na=False)
 
     # Data dengan SETORTUNAI (akan diproses untuk ekstraksi)
-    df_setortunai = df_bank[df_bank['Has_SETORTUNAI'] == True].copy()
+    df_setortunai = df_bank[df_bank['Has_SETORTUNAI'] == True].copy().reset_index(drop=True)
 
     # Data tanpa SETORTUNAI (akan disimpan sebagai non-rusun)
-    df_non_rusun = df_bank[df_bank['Has_SETORTUNAI'] == False].copy()
+    df_non_rusun = df_bank[df_bank['Has_SETORTUNAI'] == False].copy().reset_index(drop=True)
+    
+    # Hapus kolom temporary
+    df_bank = df_bank.drop(columns=['Narasi_Clean'])
+
+    # Pastikan kolom-kolom untuk hasil ekstraksi sudah ada (penting untuk mencegah KeyError)
+    for df in [df_setortunai, df_non_rusun]:
+        if 'Kode_8_Digit' not in df.columns:
+            df['Kode_8_Digit'] = ''
+        if 'Bulan' not in df.columns:
+            df['Bulan'] = ''
+        if 'Tahun' not in df.columns:
+            df['Tahun'] = ''
 
     # Fungsi ekstraksi yang diperbaiki berdasarkan analisis contoh narasi
     def extract_setortunai_only(narasi_text):
         """
-        Fungsi ekstraksi yang diperbaiki untuk menangani berbagai format narasi.
-        Perbaikan: 
-        - Kode 8 digit: cari tanpa word boundary juga untuk handle kode dengan /
-        - Bulan/Tahun: scan seluruh narasi, bukan hanya 40 karakter terakhir
-        - Update tahun: 2025 dan 2026
+        Fungsi ekstraksi yang diperbaiki untuk menangani teks yang sudah di-strip spasinya.
+        Perbaikan:
+        - Menghapus \b (word boundary) karena teks menyambung (misal: JULI2025).
+        - Menambah dukungan singkatan bulan yang lebih luas (AGS, AGT, AGU, NOP, dll).
+        - Menangani format Kode 8 digit, Bulan, dan Tahun secara independen dari spasi.
         """
         if pd.isna(narasi_text) or narasi_text == '' or narasi_text == 'nan':
             return '', '', ''
         
-        narasi_str = str(narasi_text).upper().strip()
+        narasi_str = str(narasi_text).upper().replace(' ', '').strip()
         
         # Hanya proses jika mengandung SETORTUNAI
         if 'SETORTUNAI' not in narasi_str:
             return '', '', ''
         
-        # === KODE 8 DIGIT - DIPERBAIKI ===
-        # PENTING: Kode 8 digit biasanya ada di PERTENGAHAN/AKHIR narasi, bukan di awal
-        # Awal narasi biasanya nomor transaksi bank, bukan kode rusun
+        # === KODE 8 DIGIT ===
         kode_8_digit = ''
         
-        # Cari posisi SETORTUNAI dan ambil bagian setelahnya
-        setortunai_pos = narasi_str.find('SETORTUNAI')
-        if setortunai_pos != -1:
-            # Ambil bagian narasi SETELAH kata SETORTUNAI
-            narasi_after_setortunai = narasi_str[setortunai_pos:]
-        else:
-            narasi_after_setortunai = narasi_str
-        
-        # Pattern 1: Cari kode 8 digit SETELAH SETORTUNAI dengan word boundary
-        specific_8_digits = re.findall(r'\b(0[123]\d{6})\b', narasi_after_setortunai)
-        if specific_8_digits:
-            kode_8_digit = specific_8_digits[0]
-        
-        # Pattern 2: Kode 8 digit diikuti / setelah SETORTUNAI
-        if not kode_8_digit:
-            kode_with_slash = re.findall(r'(0[123]\d{6})/', narasi_after_setortunai)
-            if kode_with_slash:
-                kode_8_digit = kode_with_slash[0]
-        
-        # Pattern 3: Kode 8 digit setelah / (format: /01020304) - setelah SETORTUNAI
-        if not kode_8_digit:
-            kode_after_slash = re.findall(r'/(0[123]\d{6})', narasi_after_setortunai)
-            if kode_after_slash:
-                kode_8_digit = kode_after_slash[0]
-        
-        # Pattern 4: Cari kode 8 digit tanpa boundary - setelah SETORTUNAI
-        if not kode_8_digit:
-            all_matches = re.findall(r'(0[123]\d{6})', narasi_after_setortunai)
-            for code in all_matches:
+        # Cari semua 8 digit (start 01, 02, 03)
+        # Gunakan regex tanpa \b karena teks kemungkinan menyambung
+        all_matches = re.findall(r'(0[123]\d{6})', narasi_str)
+        if all_matches:
+            # Gunakan match terakhir jika ada beberapa (biasanya yang paling spesifik)
+            # kecuali jika match tersebut adalah tahun (2024-2027)
+            for code in reversed(all_matches):
                 if not code.startswith(('2024', '2025', '2026', '2027')):
                     kode_8_digit = code
                     break
         
-        # Pattern 5: Fallback - cari 8 digit di SELURUH narasi jika masih tidak ada
-        if not kode_8_digit:
-            # Coba cari di setengah akhir narasi dulu
-            half_pos = len(narasi_str) // 2
-            second_half = narasi_str[half_pos:]
-            all_8_digits = re.findall(r'(0[123]\d{6})', second_half)
-            for code in all_8_digits:
-                if not code.startswith(('2024', '2025', '2026', '2027')):
-                    kode_8_digit = code
-                    break
-        
-        # === BULAN - DIPERBAIKI: SCAN SELURUH NARASI ===
+        # === BULAN & TAHUN ===
         bulan = ''
-        
-        # 1. Cari nama bulan lengkap + tahun 4 digit di SELURUH narasi
-        full_month_year_4digit = r'(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(20\d{2})'
-        matches = re.findall(full_month_year_4digit, narasi_str)
-        if matches:
-            month_name = matches[-1][0]
-            month_dict = {
-                'JANUARI': 'Januari', 'FEBRUARI': 'Februari', 'MARET': 'Maret', 'APRIL': 'April',
-                'MEI': 'Mei', 'JUNI': 'Juni', 'JULI': 'Juli', 'AGUSTUS': 'Agustus',
-                'SEPTEMBER': 'September', 'OKTOBER': 'Oktober', 'NOVEMBER': 'November', 'DESEMBER': 'Desember'
-            }
-            bulan = month_dict.get(month_name, '')
-        
-        # 2. Cari pattern BULAN + nama bulan (BULANJUNI, BULANMEI, dll)
-        if not bulan:
-            bulan_prefix = r'BULAN(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)'
-            matches = re.findall(bulan_prefix, narasi_str)
-            if matches:
-                month_name = matches[-1]
-                month_dict = {
-                    'JANUARI': 'Januari', 'FEBRUARI': 'Februari', 'MARET': 'Maret', 'APRIL': 'April',
-                    'MEI': 'Mei', 'JUNI': 'Juni', 'JULI': 'Juli', 'AGUSTUS': 'Agustus',
-                    'SEPTEMBER': 'September', 'OKTOBER': 'Oktober', 'NOVEMBER': 'November', 'DESEMBER': 'Desember'
-                }
-                bulan = month_dict.get(month_name, '')
-        
-        # 3. Cari pattern bulan singkat + tahun 4 digit (FEB2025, JAN2025, DES2024)
-        if not bulan:
-            short_month_year_4digit = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(20\d{2})'
-            matches = re.findall(short_month_year_4digit, narasi_str)
-            if matches:
-                month_abbr = matches[-1][0]
-                short_month_dict = {
-                    'JAN': 'Januari', 'FEB': 'Februari', 'MAR': 'Maret', 'APR': 'April',
-                    'MEI': 'Mei', 'JUN': 'Juni', 'JUL': 'Juli', 'AGS': 'Agustus', 'AGST': 'Agustus', 'AGU': 'Agustus',
-                    'SEP': 'September', 'SEPT': 'September', 'OKT': 'Oktober', 'NOV': 'November', 'NOP': 'November', 'DES': 'Desember'
-                }
-                bulan = short_month_dict.get(month_abbr, '')
-        
-        # 4. Cari nama bulan lengkap di seluruh narasi (standalone)
-        if not bulan:
-            full_month_names = ['JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI', 
-                               'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER']
-            for month_name in full_month_names:
-                if month_name in narasi_str:
-                    month_dict = {
-                        'JANUARI': 'Januari', 'FEBRUARI': 'Februari', 'MARET': 'Maret', 'APRIL': 'April',
-                        'MEI': 'Mei', 'JUNI': 'Juni', 'JULI': 'Juli', 'AGUSTUS': 'Agustus',
-                        'SEPTEMBER': 'September', 'OKTOBER': 'Oktober', 'NOVEMBER': 'November', 'DESEMBER': 'Desember'
-                    }
-                    bulan = month_dict[month_name]
-                    break
-        
-        # 5. Cari pattern bulan singkat + 2 digit tahun (NOV25, DES24, JUL25, dll)
-        if not bulan:
-            short_month_dict = {
-                'JAN': 'Januari', 'FEB': 'Februari', 'MAR': 'Maret', 'APR': 'April',
-                'MEI': 'Mei', 'JUN': 'Juni', 'JUL': 'Juli', 'AGS': 'Agustus', 'AGST': 'Agustus', 'AGU': 'Agustus',
-                'SEP': 'September', 'SEPT': 'September', 'OKT': 'Oktober', 'NOV': 'November', 'NOP': 'November', 'DES': 'Desember'
-            }
-            # Pattern dinamis: 2 digit tahun (bisa 24, 25, 26, 27, dst)
-            month_pattern = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(\d{2})'
-            matches = re.findall(month_pattern, narasi_str)
-            if matches:
-                month_abbr = matches[-1][0]
-                bulan = short_month_dict.get(month_abbr, '')
-        
-        # 6. Cari pattern BLN + singkatan (BLNJAN, BLNFEB, dll)
-        if not bulan:
-            bln_abbreviations = {
-                'BLNJAN': 'Januari', 'BLNFEB': 'Februari', 'BLNMAR': 'Maret', 'BLNAPR': 'April',
-                'BLNMEI': 'Mei', 'BLNJUN': 'Juni', 'BLNJUL': 'Juli', 'BLNAGS': 'Agustus', 'BLNAGST': 'Agustus', 'BLNAGU': 'Agustus',
-                'BLNSEP': 'September', 'BLNSEPT': 'September', 'BLNOKT': 'Oktober', 'BLNNOV': 'November', 'BLNNOP': 'November', 'BLNDES': 'Desember'
-            }
-            for bln_code, month_name in bln_abbreviations.items():
-                if bln_code in narasi_str:
-                    bulan = month_name
-                    break
-        
-        # === TAHUN - DIPERBAIKI: SCAN SELURUH NARASI ===
         tahun = ''
         
-        # 1. Cari format bulan lengkap + tahun 4 digit (JUNI2025, MEI2025)
-        full_month_year_4digit = r'(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(20\d{2})'
-        matches = re.findall(full_month_year_4digit, narasi_str)
-        if matches:
-            year_part = matches[-1][-1]
-            if year_part.isdigit() and len(year_part) == 4:
-                tahun = year_part
+        # Mapping bulan lengkap dan singkat
+        month_dict = {
+            'JANUARI': 'Januari', 'FEBRUARI': 'Februari', 'MARET': 'Maret', 'APRIL': 'April',
+            'MEI': 'Mei', 'JUNI': 'Juni', 'JULI': 'Juli', 'AGUSTUS': 'Agustus',
+            'SEPTEMBER': 'September', 'OKTOBER': 'Oktober', 'NOVEMBER': 'November', 'DESEMBER': 'Desember',
+            'JAN': 'Januari', 'FEB': 'Februari', 'MAR': 'Maret', 'APR': 'April',
+            'JUN': 'Juni', 'JUL': 'Juli', 'AGS': 'Agustus', 'AGST': 'Agustus', 'AGU': 'Agustus', 'AGT': 'Agustus',
+            'SEP': 'September', 'SEPT': 'September', 'OKT': 'Oktober', 'NOV': 'November', 'NOP': 'November', 'DES': 'Desember'
+        }
         
-        # 2. Cari pattern bulan singkat + tahun 4 digit (FEB2025, JAN2025)
-        if not tahun:
-            short_month_year_4digit = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(20\d{2})'
-            matches = re.findall(short_month_year_4digit, narasi_str)
-            if matches:
-                year_part = matches[-1][-1]
-                if year_part.isdigit() and len(year_part) == 4:
-                    tahun = year_part
+        # Pattern untuk semua variasi nama bulan
+        month_names_pattern = '|'.join(month_dict.keys())
         
-        # 3. Cari pattern bulan singkat + 2 digit tahun (NOV25, DES26, JUL25)
-        if not tahun:
-            # Pattern dinamis: 2 digit tahun
-            month_pattern = r'(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGS|AGST|AGU|SEP|SEPT|OKT|NOV|NOP|DES)(\d{2})'
-            matches = re.findall(month_pattern, narasi_str)
-            if matches:
-                year_part = matches[-1][1]
-                if year_part.isdigit() and len(year_part) == 2:
-                    tahun = '20' + year_part
+        # 1. Cari Nama Bulan + Tahun 4 digit (misal: JULI2025, JUL2025)
+        # Gunakan \s* untuk jaga-jaga jika ada spasi yang lolos, tapi utamanya handle tanpa spasi
+        match_month_year_4d = re.findall(f'({month_names_pattern})\\s*(20\\d{{2}})', narasi_str)
+        if match_month_year_4d:
+            bulan = month_dict.get(match_month_year_4d[-1][0], '')
+            tahun = match_month_year_4d[-1][1]
         
-        # 4. Cari format bulan lengkap + tahun 2 digit
-        if not tahun:
-            # Pattern dinamis: 2 digit tahun
-            full_month_year_2digit = r'(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)(\d{2})'
-            matches = re.findall(full_month_year_2digit, narasi_str)
-            if matches:
-                year_part = matches[-1][-1]
-                if year_part.isdigit() and len(year_part) == 2:
-                    tahun = '20' + year_part
+        # 2. Cari Nama Bulan + Tahun 2 digit (misal: JUNI25, JUN25, DES24)
+        if not bulan or not tahun:
+            match_month_year_2d = re.findall(f'({month_names_pattern})\\s*(\\d{{2}})', narasi_str)
+            if match_month_year_2d:
+                # Pastikan 2 digit tersebut adalah rentang tahun yang masuk akal (24-27)
+                y_part = match_month_year_2d[-1][1]
+                if y_part in ['24', '25', '26', '27']:
+                    if not bulan: bulan = month_dict.get(match_month_year_2d[-1][0], '')
+                    if not tahun: tahun = '20' + y_part
         
-        # 5. Cari pattern BLN + bulan + tahun
-        if not tahun:
-            # Pattern dinamis: 2 digit tahun
-            bln_pattern = r'BLN(JAN|FEB|MAR|APR|MEI|JUN|JUL|AGST|AGU|SEPT|SEP|OKT|NOV|NOP|DES)(\d{2})'
-            matches = re.findall(bln_pattern, narasi_str)
-            if matches:
-                year_part = matches[-1][1]
-                if year_part.isdigit() and len(year_part) == 2:
-                    tahun = '20' + year_part
+        # 3. Cari prefix BULAN + Nama (misal: BULANJUNI)
+        if not bulan:
+            match_bulan_prefix = re.findall(f'BULAN({month_names_pattern})', narasi_str)
+            if match_bulan_prefix:
+                bulan = month_dict.get(match_bulan_prefix[-1], '')
         
-        # 6. Cari tahun 4 digit standalone (dinamis)
+        # 4. Cari Standalone Month Name (ambil yang terakhir ditemukan)
+        if not bulan:
+            all_month_found = []
+            for name, clean_name in month_dict.items():
+                if name in narasi_str:
+                    # Cari semua kemunculan dan ambil yang paling belakang
+                    for m in re.finditer(name, narasi_str):
+                        all_month_found.append((m.start(), clean_name))
+            if all_month_found:
+                all_month_found.sort(key=lambda x: x[0])
+                bulan = all_month_found[-1][1]
+        
+        # 5. Cari Standalone Year 4 digit (fallback)
         if not tahun:
-            year_4_digit = re.findall(r'\b(20\d{2})\b', narasi_str)
-            if year_4_digit:
-                tahun = year_4_digit[-1]
+            years = re.findall(r'(20\d{2})', narasi_str)
+            if years:
+                # Filter agar tidak mengambil kode ID yang kebetulan diawali 20
+                for y in reversed(years):
+                    if y in ['2024', '2025', '2026', '2027']:
+                        tahun = y
+                        break
         
         return kode_8_digit, bulan, tahun
 
@@ -523,9 +445,10 @@ def process_setortunai(df_bank):
         # Reset kolom ekstraksi untuk data SETORTUNAI
         extraction_results = df_setortunai['Narasi'].apply(extract_setortunai_only)
         
-        df_setortunai['Kode_8_Digit'] = extraction_results.apply(lambda x: x[0])
-        df_setortunai['Bulan'] = extraction_results.apply(lambda x: x[1])
-        df_setortunai['Tahun'] = extraction_results.apply(lambda x: x[2])
+        # Ekstrak kolom secara aman (cegah float subscripting error)
+        df_setortunai['Kode_8_Digit'] = extraction_results.apply(lambda x: x[0] if isinstance(x, (list, tuple)) and len(x) > 0 else '')
+        df_setortunai['Bulan'] = extraction_results.apply(lambda x: x[1] if isinstance(x, (list, tuple)) and len(x) > 1 else '')
+        df_setortunai['Tahun'] = extraction_results.apply(lambda x: x[2] if isinstance(x, (list, tuple)) and len(x) > 2 else '')
         
         # Hapus kolom helper
         df_setortunai = df_setortunai.drop('Has_SETORTUNAI', axis=1)
@@ -542,8 +465,21 @@ def process_setortunai(df_bank):
     
     return df_setortunai, df_non_rusun
 
-def filter_incomplete_data(df_setortunai, df_non_rusun):
+def filter_incomplete_data(df_setortunai, df_non_rusun, supported_years=None):
     """Filter data yang tidak lengkap dan tahun yang tidak didukung"""
+    # Jika tidak ada data yang perlu diproses, kembalikan data apa adanya
+    if len(df_setortunai) == 0:
+        return df_setortunai.copy(), df_non_rusun.copy()
+        
+    # Default supported years jika tidak diberikan (fallback ke tahun berjalan & sebelumnya)
+    if supported_years is None:
+        current_year = datetime.now().year
+        previous_year = current_year - 1
+        supported_years = [str(previous_year), str(current_year)]
+    
+    # Pastikan supported_years dalam bentuk string untuk pencocokan yang tepat
+    supported_years = [str(y) for y in supported_years]
+    
     # Cek data yang lengkap
     incomplete_mask = (
         (df_setortunai['Kode_8_Digit'] == '') |
@@ -551,10 +487,7 @@ def filter_incomplete_data(df_setortunai, df_non_rusun):
         (df_setortunai['Tahun'] == '')
     )
     
-    # Cek data dengan tahun yang tidak didukung (hanya tahun berjalan dan tahun sebelumnya)
-    current_year = datetime.now().year
-    previous_year = current_year - 1
-    supported_years = [str(previous_year), str(current_year)]
+    # Cek data dengan tahun yang tidak didukung
     unsupported_year_mask = ~df_setortunai['Tahun'].astype(str).isin(supported_years)
     
     # Cek data dengan Credit Transaction > 700.000
@@ -580,11 +513,10 @@ def filter_incomplete_data(df_setortunai, df_non_rusun):
         if row['Tahun'] == '':
             missing_fields.append('Tahun')
         
-        # Cek tahun yang tidak didukung (dinamis berdasarkan tahun berjalan)
-        current_year = datetime.now().year
-        previous_year = current_year - 1
-        if str(row['Tahun']) not in [str(previous_year), str(current_year)] and str(row['Tahun']) != '':
-            reasons.append(f'Tahun {row["Tahun"]} tidak didukung (hanya {previous_year}-{current_year})')
+        # Cek tahun yang tidak didukung
+        if str(row['Tahun']) not in supported_years and str(row['Tahun']) != '':
+            years_str = ", ".join(supported_years)
+            reasons.append(f'Tahun {row["Tahun"]} tidak didukung (Pilihan: {years_str})')
         
         # Cek Credit Transaction > 700.000
         credit_amount = to_numeric_safe(row.get('Credit Transaction', 0))
@@ -602,7 +534,7 @@ def filter_incomplete_data(df_setortunai, df_non_rusun):
     # Gabungkan dengan data non-rusun
     df_non_rusun_new = pd.concat([df_non_rusun, df_setortunai_to_move], ignore_index=True)
     
-    return df_setortunai_complete, df_non_rusun_new
+    return df_setortunai_complete.reset_index(drop=True), df_non_rusun_new.reset_index(drop=True)
 
 def extract_from_master_excel(df_setortunai, master_files):
     """Ekstrak data dari Master Excel (disesuaikan dengan kode dari notebook) - OPTIMIZED VERSION"""
@@ -782,16 +714,35 @@ def extract_from_master_excel(df_setortunai, master_files):
         except Exception:
             return pd.Series([None] * len(extract_cols), index=extract_cols)
     
-    # Terapkan ekstraksi dengan fungsi yang dioptimasi
-    extraction_results = df_setortunai.apply(extract_data_excel_optimized, axis=1)
+    # FIX 2: Ganti apply() dengan iterrows + list comprehension
+    # Ini 100% predictable shape-nya — tidak bergantung pada perilaku apply() yang berbeda
+    # antara 1 baris vs banyak baris, dan menghindari float subscriptable error.
+    rows_extracted = []
+    for _, row in df_setortunai.iterrows():
+        result = extract_data_excel_optimized(row)
+        # result adalah pd.Series dengan index=extract_cols, konversi ke list biasa
+        if isinstance(result, pd.Series):
+            rows_extracted.append(result.tolist())
+        else:
+            rows_extracted.append([None] * len(extract_cols))
     
-    # Gabungkan dengan dataframe asli
+    extraction_results = pd.DataFrame(
+        rows_extracted,
+        columns=extract_cols,
+        index=df_setortunai.index
+    )
+    
+    # Gabungkan dengan dataframe asli (reset index untuk menyelaraskan)
+    df_setortunai = df_setortunai.reset_index(drop=True)
+    extraction_results = extraction_results.reset_index(drop=True)
     df_with_extract = pd.concat([df_setortunai, extraction_results], axis=1)
     
     return df_with_extract
 
 def calculate_denda(df_with_extract):
     """Kalkulasi denda berdasarkan selisih Credit Transaction dengan total sewa"""
+    # Bersihkan indeks untuk mencegah Shape Error (Pandas 3.0 Strict Behavior)
+    df_with_extract = df_with_extract.reset_index(drop=True)
     def parse_kode_for_mapping(kode):
         if len(str(kode)) >= 8:
             rusunawa_code = str(kode)[:2]
@@ -843,9 +794,21 @@ def calculate_denda(df_with_extract):
             return 0.0
     
     # Tambahkan kolom mapping
+    # Detach mapping results secara aman ke dalam kolom-kolom baru
     mapping_results = df_with_extract['Kode_8_Digit'].apply(parse_kode_for_mapping)
-    for key in ['Rusunawa', 'Gedung', 'Lantai', 'No Hunian']:
-        df_with_extract[key] = [result[key] for result in mapping_results]
+    
+    # Konversi list dari dictionary ke DataFrame secara lebih aman
+    if not mapping_results.empty:
+        mapping_df = pd.DataFrame(mapping_results.tolist(), index=df_with_extract.index)
+        for key in ['Rusunawa', 'Gedung', 'Lantai', 'No Hunian']:
+            if key in mapping_df.columns:
+                df_with_extract[key] = mapping_df[key]
+            else:
+                # Fallback jika kunci tidak ditemukan dlm dict
+                df_with_extract[key] = '' if key != 'No Hunian' else 0
+    else:
+        for key in ['Rusunawa', 'Gedung', 'Lantai', 'No Hunian']:
+            df_with_extract[key] = '' if key != 'No Hunian' else 0
     
     # Kalkulasi denda berdasarkan selisih Credit Transaction dengan total sewa
     df_with_extract['Denda'] = df_with_extract.apply(calculate_denda_amount, axis=1)
@@ -933,7 +896,19 @@ def input_to_excel_master(df_final, master_files):
             excel_file = master_files.get(str(tahun))
             
             if not excel_file or not os.path.exists(excel_file):
-                results['errors'].append(f"File tidak ditemukan untuk tahun {tahun}")
+                error_msg = f"File tidak ditemukan untuk tahun {tahun}"
+                results['errors'].append(error_msg)
+                # Log detail kegagalan untuk semua baris ditahun ini agar muncul di report sebagai "Belum Diproses"
+                for _, row in group_data.iterrows():
+                    results['failed'] += 1
+                    results['failed_details'].append({
+                        'Kode_8_Digit': str(row.get('Kode_8_Digit', '')),
+                        'Bulan': str(row.get('Bulan', '')),
+                        'Tanggal': str(row.get('Tanggal', '')),
+                        'Narasi': str(row.get('Narasi', '')),
+                        'Credit Transaction': to_numeric_safe(row.get('Credit Transaction', 0)),
+                        'Reason': f"Gagal: Master Excel tahun {tahun} tidak diupload"
+                    })
                 continue
             
             try:
@@ -1038,13 +1013,14 @@ def input_to_excel_master(df_final, master_files):
 
     # === EKSEKUSI UTAMA ===
     
-    # Filter data valid secara langsung
+    # FIX 4: Filter yang lebih aman — isi Denda None dengan 0 dulu agar tidak terfilter
+    df_final['Denda'] = df_final['Denda'].fillna(0)
+    
     valid_data = df_final[
-        (df_final['Kode_8_Digit'].str.len() == 8) & 
-        (df_final['Bulan'].notna()) & (df_final['Bulan'] != '') &
-        (df_final['Tahun'].notna()) & (df_final['Tahun'] != '') &
-        (df_final['Posting Date'].notna()) &
-        (df_final['Denda'].notna())
+        (df_final['Kode_8_Digit'].astype(str).str.len() == 8) &
+        (df_final['Bulan'].fillna('') != '') &
+        (df_final['Tahun'].fillna('') != '') &
+        (df_final['Posting Date'].notna())
     ].copy()
     
     if not valid_data.empty:
@@ -1053,15 +1029,25 @@ def input_to_excel_master(df_final, master_files):
     else:
         results = {'success': 0, 'skipped': 0, 'failed': 0, 'errors': ['Tidak ada data valid untuk diinput setelah difilter.'], 'skipped_details': [], 'success_details': [], 'failed_details': [], 'backup_files': {}}
     
-    return df_final, results
+    # FIX 4b: kembalikan valid_data (bukan df_final) agar Status_Input sheet berisi data yang diproses
+    return valid_data, results
 
 def create_export_excel(results, valid_data, df_final, df_non_rusun):
     """Membuat file Excel hasil dengan beberapa sheet"""
+    
+    # FIX 3: Helper akses kolom DataFrame secara aman
+    def safe_col(df, col_name, default_val=None):
+        """Return kolom jika ada, atau Series berisi default_val jika tidak."""
+        if col_name in df.columns:
+            return df[col_name]
+        return pd.Series([default_val] * len(df), index=df.index)
+    
     # Buat dataframe untuk export dengan kolom status
     df_export_status = valid_data.copy()
     df_export_status['Status_Input'] = 'Belum Diproses'
     df_export_status['Keterangan_Input'] = ''
-    df_export_status['Nilai_Denda_Input'] = ''
+    # FIX: Inisialisasi sebagai float, bukan string kosong, untuk mencegah Dtype error di Pandas 3.0
+    df_export_status['Nilai_Denda_Input'] = 0.0
     
     # Update status berdasarkan hasil
     for success_detail in results.get('success_details', []):
@@ -1157,27 +1143,27 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         axis=1
     )
     
-    # Format kolom untuk sheet Kasda
+    # FIX 3: Format kolom untuk sheet Kasda — gunakan safe_col() bukan df.get()
     df_kasda_export = pd.DataFrame({
         'No Urut': df_kasda['No Urut'],
         'Tanggal Setor': df_kasda['Posting Date'],
         'Tanggal Kasda': df_kasda['Posting Date'],
-        'Rusunawa': df_kasda.get('Rusunawa', ''),
+        'Rusunawa': safe_col(df_kasda, 'Rusunawa', ''),
         'Gedung': [item[0] for item in gedung_lantai_hunian],
         'Lantai': [item[1] for item in gedung_lantai_hunian],
         'No Hunian': [item[2] for item in gedung_lantai_hunian],
-        'Nama Penghuni': df_kasda.get('Nama Penghuni', ''),
-        'Tanggal Perjanjian': df_kasda.get('Tanggal Perjanjian Sewa', '').apply(format_date_ddmmmyy),
-        'Sewa Hunian': df_kasda.get('Sewa Hunian', 0).apply(to_numeric_safe),
-        'Sewa Lantai 1': df_kasda.get('Sewa Lahan Lantai 1', 0).apply(to_numeric_safe),
-        'Denda': None,
-        'Jumlah': (df_kasda.get('Sewa Hunian', 0).apply(to_numeric_safe) + 
-                  df_kasda.get('Sewa Lahan Lantai 1', 0).apply(to_numeric_safe)),
+        'Nama Penghuni': safe_col(df_kasda, 'Nama Penghuni', ''),
+        'Tanggal Perjanjian': safe_col(df_kasda, 'Tanggal Perjanjian Sewa', '').apply(format_date_ddmmmyy),
+        'Sewa Hunian': safe_col(df_kasda, 'Sewa Hunian', 0).apply(to_numeric_safe),
+        'Sewa Lantai 1': safe_col(df_kasda, 'Sewa Lahan Lantai 1', 0).apply(to_numeric_safe),
+        'Denda': 0.0, # FIX: Inisialisasi float
+        'Jumlah': (safe_col(df_kasda, 'Sewa Hunian', 0).apply(to_numeric_safe) +
+                   safe_col(df_kasda, 'Sewa Lahan Lantai 1', 0).apply(to_numeric_safe)),
         'Bulan': df_kasda.apply(lambda x: convert_to_first_of_month_date(x.get('Bulan'), x.get('Tahun')), axis=1)
     })
     
-    # Data untuk sheet Denda
-    df_denda_filter = df_final[df_final.get('Denda', 0).apply(to_numeric_safe) > 0].copy()
+    # FIX 3: Data untuk sheet Denda — gunakan safe_col() bukan df.get()
+    df_denda_filter = df_final[safe_col(df_final, 'Denda', 0).apply(to_numeric_safe) > 0].copy()
     df_denda = df_denda_filter.reset_index(drop=True)
     df_denda['No Urut'] = range(1, len(df_denda) + 1)
     
@@ -1197,16 +1183,17 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         'No Hunian': [item[2] for item in gedung_lantai_hunian_denda],
         'Nama Penghuni': df_denda.get('Nama Penghuni', ''),
         'Tanggal Perjanjian': df_denda.get('Tanggal Perjanjian Sewa', '').apply(format_date_ddmmmyy),
-        'Denda': df_denda.get('Denda', 0).apply(to_numeric_safe),
-        'Jumlah': df_denda.get('Denda', 0).apply(to_numeric_safe),
+        'Denda': pd.to_numeric(df_denda.get('Denda', 0), errors='coerce').fillna(0.0),
+        'Jumlah': pd.to_numeric(df_denda.get('Denda', 0), errors='coerce').fillna(0.0),
         'Bulan': df_denda.apply(lambda x: convert_to_first_of_month_date(x.get('Bulan'), x.get('Tahun')), axis=1)
     })
     
-    # Konversi kolom numeric di df_export_status
-    money_columns_status = ['Credit Transaction', 'Balance', 'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda']
+    # Konversi kolom numeric di df_export_status secara eksplisit
+    money_columns_status = ['Credit Transaction', 'Balance', 'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda', 'Nilai_Denda_Input']
     for col in money_columns_status:
         if col in df_export_status.columns:
-            df_export_status[col] = df_export_status[col].apply(to_numeric_safe)
+            # Gunakan pd.to_numeric untuk memastikan tipe data float/numeric murni
+            df_export_status[col] = pd.to_numeric(df_export_status[col], errors='coerce').fillna(0.0)
     
     # Export ke file Excel
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1218,12 +1205,18 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         # Sheet 1: Data status input
         df_export_status.to_excel(writer, sheet_name='Status_Input', index=False)
         
-        # Sheet 2: Data non-rusun untuk cek manual
-        if len(df_non_rusun) > 0:
-            df_non_rusun_export = df_non_rusun.copy()
+        # Sheet 2: Data Cek Manual (Non-Rusun + Gagal Mapping Kode)
+        df_tidak_ditemukan = df_export_status[df_export_status['Keterangan_Input'] == 'Kombinasi kode tidak ditemukan'].copy()
+        
+        # Gabungkan data non-rusun dengan data yang tidak ditemukan kodenya di Master
+        df_non_rusun_final = pd.concat([df_non_rusun, df_tidak_ditemukan], ignore_index=True)
+        
+        if len(df_non_rusun_final) > 0:
+            df_non_rusun_export = df_non_rusun_final.copy()
             for col in money_columns_status:
                 if col in df_non_rusun_export.columns:
-                    df_non_rusun_export[col] = df_non_rusun_export[col].apply(to_numeric_safe)
+                    # FIX: Gunakan pd.to_numeric untuk konsistensi
+                    df_non_rusun_export[col] = pd.to_numeric(df_non_rusun_export[col], errors='coerce').fillna(0.0)
             df_non_rusun_export.to_excel(writer, sheet_name='Cek Manual', index=False)
         
         # Sheet 3: Data Kasda
@@ -1246,7 +1239,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         
         # 3. Definisikan kolom-kolom uang per sheet
         money_cols = {
-            'Status_Input': ['Credit Transaction', 'Balance', 'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda'],
+            'Status_Input': ['Credit Transaction', 'Balance', 'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda', 'Nilai_Denda_Input'],
             'Cek Manual': money_columns_status,
             'Kasda': ['Sewa Hunian', 'Sewa Lantai 1', 'Jumlah'],
             'Denda': ['Denda', 'Jumlah']
@@ -1394,6 +1387,33 @@ def main():
             with col3:
                 st.metric("❌ Gagal", st.session_state.results['failed'])
         
+        # BARU: Preview Data Per Tahap (Best Practice)
+        st.markdown("---")
+        st.subheader("🔍 Preview Data Per Tahap")
+        st.info("Pilih expander di bawah untuk melihat detail data pada setiap tahapan proses.")
+        
+        # Tahap 1: Data Bank (Raw)
+        if st.session_state.df_bank is not None:
+            with st.expander(f"📄 Tahap 1: Hasil Ekstraksi PDF ({len(st.session_state.df_bank)} Baris)"):
+                st.dataframe(st.session_state.df_bank, use_container_width=True)
+        
+        # Tahap 2: Data SETORTUNAI
+        if st.session_state.df_setortunai is not None:
+            with st.expander(f"🔍 Tahap 2: Data SETORTUNAI Terdeteksi ({len(st.session_state.df_setortunai)} Baris)"):
+                st.dataframe(st.session_state.df_setortunai, use_container_width=True)
+        
+        # Tahap 3: Data Final & Denda
+        if st.session_state.df_final is not None:
+            with st.expander(f"💰 Tahap 3: Hasil Matching & Kalkulasi Denda ({len(st.session_state.df_final)} Baris)"):
+                # Urutkan berdasarkan denda tertinggi untuk memudahkan pengecekan
+                df_preview_final = st.session_state.df_final.sort_values(by='Denda', ascending=False)
+                st.dataframe(df_preview_final, use_container_width=True)
+        
+        # Tahap 4: Data Non-Rusun / Cek Manual
+        if st.session_state.df_non_rusun is not None:
+            with st.expander(f"⚠️ Tahap 4: Data Cek Manual / Non-Rusun ({len(st.session_state.df_non_rusun)} Baris)"):
+                st.dataframe(st.session_state.df_non_rusun, use_container_width=True)
+
         # Tombol untuk mulai baru
         st.markdown("---")
         if st.button("🔄 Proses File Baru", type="secondary", use_container_width=True):
@@ -1423,28 +1443,29 @@ def main():
         with col2:
             st.markdown("#### 📊 Master Excel")
             
-            # Dinamis berdasarkan tahun berjalan
-            current_year = datetime.now().year
-            previous_year = current_year - 1
-            
-            master_prev = st.file_uploader(
-                f"Master Excel {previous_year}", 
-                type=["xlsx"], 
-                key=f"master_{previous_year}",
-                help=f"File Excel master untuk data tahun {previous_year}"
+            # Pilihan Tahun Manual (Decoupled from System Time)
+            current_yr = datetime.now().year
+            selected_years = st.multiselect(
+                "Pilih Tahun Data yang diproses",
+                options=[str(y) for y in range(current_yr - 5, current_yr + 2)],
+                default=[str(current_yr - 1), str(current_yr)],
+                help="Data dengan tahun di luar pilihan ini akan dipindahkan ke tab 'Cek Manual' (Tahun Tidak Didukung)"
             )
             
-            master_curr = st.file_uploader(
-                f"Master Excel {current_year}", 
-                type=["xlsx"], 
-                key=f"master_{current_year}",
-                help=f"File Excel master untuk data tahun {current_year}"
-            )
-            
-            if master_prev:
-                st.success(f"✅ {previous_year}: {master_prev.name}")
-            if master_curr:
-                st.success(f"✅ {current_year}: {master_curr.name}")
+            uploaded_masters = {}
+            if selected_years:
+                for year in selected_years:
+                    master_file_up = st.file_uploader(
+                        f"Master Excel {year}", 
+                        type=["xlsx"], 
+                        key=f"master_{year}",
+                        help=f"File Excel master untuk data tahun {year}"
+                    )
+                    if master_file_up:
+                        uploaded_masters[year] = master_file_up
+                        st.success(f"✅ {year}: {master_file_up.name}")
+            else:
+                st.warning("⚠️ Pilih minimal satu tahun data")
         
         st.markdown("---")
         
@@ -1469,12 +1490,9 @@ def main():
                     temp_pdf = save_uploadedfile_temp(bank_file, "bank_files")
                     
                     master_files = {}
-                    if master_prev:
-                        temp_master_prev = save_uploadedfile_temp(master_prev, "Master Data")
-                        master_files[str(previous_year)] = temp_master_prev
-                    if master_curr:
-                        temp_master_curr = save_uploadedfile_temp(master_curr, "Master Data")
-                        master_files[str(current_year)] = temp_master_curr
+                    for year, file_obj in uploaded_masters.items():
+                        temp_path = save_uploadedfile_temp(file_obj, "Master Data")
+                        master_files[str(year)] = temp_path
                     
                     # Step 2: Proses PDF
                     status_text.info("🔄 **Langkah 2/6:** Mengekstrak data dari PDF Bank Statement...")
@@ -1496,7 +1514,9 @@ def main():
                     status_text.info("🔄 **Langkah 4/6:** Memfilter data dan mengekstrak dari Master Excel...")
                     progress_bar.progress(50)
                     
-                    df_setortunai_filtered, df_non_rusun_new = filter_incomplete_data(df_setortunai, df_non_rusun)
+                    df_setortunai_filtered, df_non_rusun_new = filter_incomplete_data(df_setortunai, df_non_rusun, selected_years)
+                    
+                    # Cek if data matches empty
                     
                     if master_files:
                         df_with_extract = extract_from_master_excel(df_setortunai_filtered, master_files)
