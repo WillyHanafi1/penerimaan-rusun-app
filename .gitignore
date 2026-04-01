@@ -1,6 +1,8 @@
 # File Excel dan PDF yang besar
 *.xlsx
 *.pdf
+_temp_junk/
+
 __pycache__/
 *.pyc
 *.pyo
