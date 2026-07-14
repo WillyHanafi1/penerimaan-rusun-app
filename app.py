@@ -45,6 +45,35 @@ def init_session_state():
     if 'export_file' not in st.session_state:
         st.session_state.export_file = None
 
+
+PREVIEW_ROW_LIMIT = 500
+
+
+def show_dataframe_preview(df, *, sort_by=None, ascending=True):
+    """Tampilkan sampel DataFrame tanpa mengirim seluruh data ke browser."""
+    if sort_by and sort_by in df.columns:
+        preview = df.sort_values(by=sort_by, ascending=ascending).head(PREVIEW_ROW_LIMIT).copy()
+    else:
+        preview = df.head(PREVIEW_ROW_LIMIT).copy()
+
+    # Kolom dari Excel/PDF dapat berisi tipe campuran. Normalisasi hanya salinan
+    # preview agar serialisasi Arrow stabil; DataFrame hasil tetap utuh.
+    text_columns = [
+        column
+        for column in preview.columns
+        if pd.api.types.is_object_dtype(preview[column].dtype)
+        or pd.api.types.is_string_dtype(preview[column].dtype)
+    ]
+    for column in text_columns:
+        preview[column] = preview[column].astype(str)
+
+    st.dataframe(preview, width="stretch")
+    if len(df) > PREVIEW_ROW_LIMIT:
+        st.caption(
+            f"Menampilkan {PREVIEW_ROW_LIMIT:,} dari {len(df):,} baris. "
+            "Seluruh data tetap tersedia di file hasil."
+        )
+
 # Fungsi utilitas
 def save_uploadedfile_temp(uploaded_file, subfolder=""):
     """Menyimpan file yang diupload ke folder temporary"""
@@ -1336,7 +1365,7 @@ def main():
                         file_name=filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         type="primary",
-                        use_container_width=True
+                        width="stretch"
                     )
             else:
                 st.error("❌ File export tidak ditemukan")
@@ -1366,7 +1395,7 @@ def main():
                                     file_name=f"Master_Updated_{tahun}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                     type="secondary",
-                                    use_container_width=True,
+                                    width="stretch",
                                     key=f"download_master_{tahun}"
                                 )
                 else:
@@ -1395,28 +1424,27 @@ def main():
         # Tahap 1: Data Bank (Raw)
         if st.session_state.df_bank is not None:
             with st.expander(f"📄 Tahap 1: Hasil Ekstraksi PDF ({len(st.session_state.df_bank)} Baris)"):
-                st.dataframe(st.session_state.df_bank, use_container_width=True)
+                show_dataframe_preview(st.session_state.df_bank)
         
         # Tahap 2: Data SETORTUNAI
         if st.session_state.df_setortunai is not None:
             with st.expander(f"🔍 Tahap 2: Data SETORTUNAI Terdeteksi ({len(st.session_state.df_setortunai)} Baris)"):
-                st.dataframe(st.session_state.df_setortunai, use_container_width=True)
+                show_dataframe_preview(st.session_state.df_setortunai)
         
         # Tahap 3: Data Final & Denda
         if st.session_state.df_final is not None:
             with st.expander(f"💰 Tahap 3: Hasil Matching & Kalkulasi Denda ({len(st.session_state.df_final)} Baris)"):
-                # Urutkan berdasarkan denda tertinggi untuk memudahkan pengecekan
-                df_preview_final = st.session_state.df_final.sort_values(by='Denda', ascending=False)
-                st.dataframe(df_preview_final, use_container_width=True)
+                # Urutkan berdasarkan denda tertinggi untuk memudahkan pengecekan.
+                show_dataframe_preview(st.session_state.df_final, sort_by="Denda", ascending=False)
         
         # Tahap 4: Data Non-Rusun / Cek Manual
         if st.session_state.df_non_rusun is not None:
             with st.expander(f"⚠️ Tahap 4: Data Cek Manual / Non-Rusun ({len(st.session_state.df_non_rusun)} Baris)"):
-                st.dataframe(st.session_state.df_non_rusun, use_container_width=True)
+                show_dataframe_preview(st.session_state.df_non_rusun)
 
         # Tombol untuk mulai baru
         st.markdown("---")
-        if st.button("🔄 Proses File Baru", type="secondary", use_container_width=True):
+        if st.button("🔄 Proses File Baru", type="secondary", width="stretch"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
@@ -1471,7 +1499,7 @@ def main():
         
         # Tombol proses otomatis
         if bank_file:
-            if st.button("🚀 **PROSES OTOMATIS - SEMUA LANGKAH**", type="primary", use_container_width=True):
+            if st.button("🚀 **PROSES OTOMATIS - SEMUA LANGKAH**", type="primary", width="stretch"):
                 
                 # Progress tracking
                 progress_container = st.container()
