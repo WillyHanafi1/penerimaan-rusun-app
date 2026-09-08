@@ -1,0 +1,310 @@
+"""Read the Sewa recap and reconcile receipts with bank transactions one to one."""
+
+from collections import Counter
+from datetime import datetime, time
+import re
+
+import openpyxl
+import pandas as pd
+
+
+MONTHS = [
+    'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+    'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+]
+MONTH_ALIASES = {
+    'jan': 1, 'januari': 1, 'feb': 2, 'februari': 2, 'mar': 3, 'maret': 3,
+    'apr': 4, 'april': 4, 'mei': 5, 'may': 5, 'jun': 6, 'juni': 6,
+    'jul': 7, 'juli': 7, 'agu': 8, 'ags': 8, 'agt': 8, 'agustus': 8, 'aug': 8,
+    'sep': 9, 'sept': 9, 'september': 9, 'okt': 10, 'oct': 10, 'oktober': 10,
+    'nov': 11, 'nop': 11, 'november': 11, 'des': 12, 'dec': 12, 'desember': 12,
+}
+
+
+def _text(value):
+    return '' if pd.isna(value) else str(value).strip()
+
+
+def _key(value):
+    return re.sub(r'[^A-Z0-9]', '', _text(value).upper())
+
+
+def _money(value):
+    try:
+        number = float(_text(value).replace(',', ''))
+        return round(number, 2) if pd.notna(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _date(value):
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return pd.Timestamp(value).normalize()
+    value = _text(value)
+    # Bank dates normalized by process_pdf use US order; named months are unambiguous.
+    for fmt in ('%m/%d/%Y', '%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d %b %Y',
+                '%d%b%Y', '%d-%m-%Y', '%d/%m/%Y'):
+        try:
+            return pd.Timestamp(datetime.strptime(value, fmt)).normalize()
+        except ValueError:
+            continue
+    return pd.NaT
+
+
+def _period(value):
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return MONTHS[value.month - 1], str(value.year)
+    match = re.fullmatch(r'([A-Za-z]+)[\s/.-]*(\d{4}|\d{2})', _text(value))
+    if match and match[1].lower() in MONTH_ALIASES:
+        year = match[2] if len(match[2]) == 4 else '20' + match[2]
+        return MONTHS[MONTH_ALIASES[match[1].lower()] - 1], year
+    return '', ''
+
+
+def _time(value):
+    if isinstance(value, datetime):
+        value = value.time()
+    if isinstance(value, time):
+        return value.strftime('%H:%M:%S')
+    if isinstance(value, (float, int)) and 0 <= value < 1:
+        seconds = round(value * 86400)
+        return f'{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}'
+    for fmt in ('%H:%M:%S', '%H:%M'):
+        try:
+            return datetime.strptime(_text(value), fmt).strftime('%H:%M:%S')
+        except ValueError:
+            continue
+    return ''
+
+
+def _unit_code(rusun, gedung, lantai, unit):
+    prefix = next((code for name, code in [
+        ('CIGUGUR', '01'), ('CIBEUREUM', '02'), ('MELONG', '02'), ('LEUWIGAJAH', '03'),
+    ] if name in rusun.upper()), '')
+    building = {'A': '01', 'B': '02', 'C': '03', 'D': '04'}.get(_text(gedung).upper())
+    floor = {'I': '01', 'II': '02', 'III': '03', 'IV': '04', 'V': '05'}.get(_text(lantai).upper())
+    try:
+        building = building or f'{int(float(gedung)):02d}'
+        floor = floor or f'{int(float(lantai)):02d}'
+        number = float(unit)
+        if number != int(number) or not 1 <= number <= 99:
+            return ''
+        if prefix and building in ('01', '02', '03', '04') and floor in ('01', '02', '03', '04', '05'):
+            return prefix + building + floor + f'{int(number):02d}'
+    except (TypeError, ValueError):
+        pass
+    return ''
+
+
+def read_kasda_sewa(path):
+    """Read detail rows only, excluding repeated headers, totals and the Denda sheet."""
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    records = []
+    try:
+        sheet_name = next((s for s in workbook.sheetnames if s.strip().lower() == 'sewa'), None)
+        if sheet_name is None:
+            raise ValueError("File Kasda Sewa harus memiliki sheet 'Sewa'.")
+        headers, rusun = {}, ''
+        required = {'NOURUT', 'TANGGALKASDA', 'GD', 'LT', 'UNIT', 'JUMLAH', 'BULAN', 'WAKTUBAYAR', 'METODEBAYAR'}
+        for row_number, values in enumerate(workbook[sheet_name].iter_rows(values_only=True), 1):
+            keys = {_key(v): i for i, v in enumerate(values) if _text(v)}
+            if required.issubset(keys):
+                headers = keys
+                continue
+            if _text(values[0]).upper().startswith('RUSUNAWA'):
+                rusun = _text(values[0])
+                continue
+            if not headers:
+                continue
+            def value(column):
+                return values[headers[column]] if column in headers else None
+            if not re.fullmatch(r'\d+(?:\.0)?', _text(value('NOURUT'))):
+                continue
+            month, year = _period(value('BULAN'))
+            code = _unit_code(rusun, value('GD'), value('LT'), value('UNIT'))
+            date, amount = _date(value('TANGGALKASDA')), _money(value('JUMLAH'))
+            method = _key(value('METODEBAYAR'))
+            issues = []
+            if not code:
+                issues.append('Identitas rusun/gedung/lantai/unit tidak valid')
+            if not month or not year:
+                issues.append('Periode sewa tidak valid')
+            if pd.isna(date):
+                issues.append('Tanggal Kasda tidak valid')
+            if amount is None or amount <= 0:
+                issues.append('Jumlah penerimaan tidak valid')
+            if method not in ('QRIS', 'VA'):
+                issues.append('Metode bayar belum didukung untuk pencocokan')
+            records.append({
+                'Baris_Kasda': row_number, 'Rusun_Kasda': rusun,
+                'Kode_8_Digit': code, 'Bulan': month, 'Tahun': year,
+                'Tanggal_Kasda': date, 'Waktu_Bayar_Kasda': _time(value('WAKTUBAYAR')),
+                'Metode_Bayar_Kasda': method, 'No_Referensi_Kasda': _text(value('NOREFERENSI')),
+                'Nama_Kasda': _text(value('NAMAPENGHUNI')),
+                'Jumlah_Kasda': amount, 'Denda_Kasda': _money(value('DENDA')),
+                'Keterangan_Pencocokan': ' | '.join(issues),
+            })
+        if not records:
+            raise ValueError('Tidak ada baris penerimaan yang terbaca pada sheet Sewa. Periksa header file.')
+    finally:
+        workbook.close()
+    return pd.DataFrame(records)
+
+
+def _ordered_pairs(bank_ids, receipt_ids, candidates, receipts):
+    """Align amounts/methods in order, allowing gaps on either side.
+
+    Only return pairs shared by every longest alignment. A repeated amount with
+    several equally plausible partners stays manual, without blocking later pairs.
+    """
+    n, m = len(bank_ids), len(receipt_ids)
+    left = [(candidates[b]['amount'], candidates[b]['method']) for b in bank_ids]
+    right = [(receipts[k]['Jumlah_Kasda'], receipts[k]['Metode_Bayar_Kasda']) for k in receipt_ids]
+    prefix = [[0] * (m + 1) for _ in range(n + 1)]
+    suffix = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n):
+        for j in range(m):
+            prefix[i + 1][j + 1] = (prefix[i][j] + 1 if left[i] == right[j]
+                                     else max(prefix[i][j + 1], prefix[i + 1][j]))
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            suffix[i][j] = (suffix[i + 1][j + 1] + 1 if left[i] == right[j]
+                            else max(suffix[i + 1][j], suffix[i][j + 1]))
+    best = prefix[n][m]
+    by_position = {}
+    for i in range(n):
+        for j in range(m):
+            if left[i] == right[j] and prefix[i][j] + 1 + suffix[i + 1][j + 1] == best:
+                by_position.setdefault(prefix[i][j] + 1, []).append((bank_ids[i], receipt_ids[j]))
+    return [pairs[0] for _, pairs in sorted(by_position.items()) if len(pairs) == 1]
+
+
+def reconcile_kasda_sewa(detected, manual, kasda):
+    """Promote matched bank rows, retaining the bank's amount, narrative and identity.
+
+    Reference matches require equal date, payment method and amount, and uniqueness
+    on both sides. Time-order matching can skip unmatched rows on either side,
+    between confirmed reference anchors. Ambiguous pairs remain manual.
+    """
+    detected_ids = set(detected['ID_Transaksi'])
+    bank = pd.concat([detected, manual], ignore_index=True).sort_values('Urutan_Rekening_Koran').reset_index(drop=True)
+    audit = kasda.copy().reset_index(drop=True)
+    audit['Status_Pencocokan'] = 'Belum cocok'
+    audit['ID_Transaksi'] = ''
+    audit['Metode_Pencocokan'] = ''
+    receipts = {}
+    for i, row in audit.iterrows():
+        if not row['Keterangan_Pencocokan']:
+            receipts[i] = row
+    candidates = {}
+    for i, row in bank.iterrows():
+        narration = _text(row.get('Narasi')).upper()
+        compact = re.sub(r'\s+', '', narration)
+        # A transfer/settlement mentioning QRIS is not an individual QRIS payment.
+        qris_payment = 'PAYMENTQRIS' in compact and ('RETRIBUSI' in compact or 'RUSUN' in compact)
+        method = 'QRIS' if qris_payment else ('VA' if 'PAYVA' in compact else '')
+        credit, debit = _money(row.get('Credit Transaction')), _money(row.get('Debit Transaction'))
+        date = _date(row.get('Posting Date'))
+        if not method or credit is None or credit <= 0 or (debit is not None and debit > 0) or pd.isna(date):
+            continue
+        ref = re.search(r'(?:ESB|QRP)-[A-Z0-9]+-([A-Z0-9]{6})(?=PAYMENT|\s|$)', narration)
+        if ref is None:
+            ref = re.search(r'(?:ESB|QRP)-[A-Z0-9]+-([A-Z0-9]{6})(?=PAYMENT)', compact)
+        if method == 'VA':
+            # Channel may be TLR, MBL, ATM, etc.; the VA itself remains numeric.
+            ref = re.search(r'PAYVA[A-Z]*(\d{10,})', compact)
+        candidates[i] = {'date': date, 'amount': credit, 'method': method, 'ref': ref[1] if ref else ''}
+
+    edges, reference_errors, blocked_receipts = {}, {}, set()
+    for b, transaction in candidates.items():
+        if not transaction['ref']:
+            continue
+        edges[b], same_reference = [], []
+        for k, receipt in receipts.items():
+            ref = _key(receipt['No_Referensi_Kasda'])
+            if transaction['method'] == 'QRIS':
+                ref = ref[-6:] if len(ref) >= 6 else ''
+            if (ref == transaction['ref'] and receipt['Tanggal_Kasda'] == transaction['date']
+                    and receipt['Metode_Bayar_Kasda'] == transaction['method']):
+                same_reference.append(k)
+                if receipt['Jumlah_Kasda'] == transaction['amount']:
+                    edges[b].append(k)
+        if same_reference and not edges[b]:
+            reference_errors[b] = 'Referensi cocok tetapi nominal bank dan Kasda berbeda'
+            blocked_receipts.update(same_reference)
+    usage = Counter(k for matches in edges.values() for k in matches)
+    matches = {b: (ks[0], 'Referensi + tanggal + nominal') for b, ks in edges.items()
+               if len(ks) == 1 and usage[ks[0]] == 1}
+
+    for date in sorted({x['date'] for x in candidates.values()}):
+        bank_day = [b for b, row in candidates.items() if row['date'] == date]
+        kasda_day = [k for k, row in receipts.items() if row['Tanggal_Kasda'] == date]
+        anchors = [(b, matches[b][0]) for b in bank_day if b in matches]
+        if any(not receipts[k]['Waktu_Bayar_Kasda'] for _, k in anchors):
+            continue
+        # Conflicting chronology must not override a unique reference match.
+        anchor_times = [receipts[k]['Waktu_Bayar_Kasda'] for _, k in anchors]
+        if anchor_times != sorted(anchor_times):
+            continue
+        time_counts = Counter(receipts[k]['Waktu_Bayar_Kasda'] for k in kasda_day)
+        limits = [(None, None)] + anchors + [(None, None)]
+        used_receipts = {k for k, _ in matches.values()}
+        for (before_bank, before_receipt), (after_bank, after_receipt) in zip(limits, limits[1:]):
+            left_time = receipts[before_receipt]['Waktu_Bayar_Kasda'] if before_receipt is not None else ''
+            right_time = receipts[after_receipt]['Waktu_Bayar_Kasda'] if after_receipt is not None else '24:00:00'
+            bank_segment = [b for b in bank_day if b not in matches and b not in reference_errors
+                            and (before_bank is None or b > before_bank)
+                            and (after_bank is None or b < after_bank)]
+            receipt_segment = [k for k in kasda_day if k not in used_receipts and k not in blocked_receipts
+                               and time_counts[receipts[k]['Waktu_Bayar_Kasda']] == 1
+                               and left_time < receipts[k]['Waktu_Bayar_Kasda'] < right_time]
+            receipt_segment.sort(key=lambda k: receipts[k]['Waktu_Bayar_Kasda'])
+            for b, k in _ordered_pairs(bank_segment, receipt_segment, candidates, receipts):
+                matches[b] = (k, 'Urutan waktu + tanggal + nominal')
+                used_receipts.add(k)
+
+    promoted = set()
+    metadata = ['Baris_Kasda', 'Waktu_Bayar_Kasda', 'No_Referensi_Kasda',
+                'Nama_Kasda', 'Jumlah_Kasda', 'Denda_Kasda', 'Metode_Bayar_Kasda']
+    for column in metadata + ['Metode_Pencocokan', 'Sumber_Deteksi']:
+        if column not in bank:
+            bank[column] = pd.Series([None] * len(bank), dtype=object)
+    for b, (k, method) in matches.items():
+        receipt = receipts[k]
+        bank_id = bank.at[b, 'ID_Transaksi']
+        already_complete = bank_id in detected_ids and all(_text(bank.at[b, c]) for c in ['Kode_8_Digit', 'Bulan', 'Tahun'])
+        if already_complete and any(_text(bank.at[b, c]) != _text(receipt[c]) for c in ['Kode_8_Digit', 'Bulan', 'Tahun']):
+            audit.at[k, 'Keterangan_Pencocokan'] = 'Identitas/periode Kasda berbeda dari narasi rekening koran'
+            continue
+        for column in ['Kode_8_Digit', 'Bulan', 'Tahun']:
+            bank.at[b, column] = receipt[column]
+        for column in metadata:
+            bank.at[b, column] = receipt[column]
+        bank.at[b, 'Sumber_Deteksi'] = 'Narasi + Kasda Sewa' if already_complete else 'Kasda Sewa'
+        bank.at[b, 'Metode_Pencocokan'] = method
+        promoted.add(bank_id)
+        audit.at[k, 'Status_Pencocokan'] = 'Cocok'
+        audit.at[k, 'ID_Transaksi'] = bank_id
+        audit.at[k, 'Metode_Pencocokan'] = method
+    missing_reason = (audit['Status_Pencocokan'] != 'Cocok') & (audit['Keterangan_Pencocokan'] == '')
+    audit.loc[missing_reason, 'Keterangan_Pencocokan'] = 'Tidak ditemukan pasangan urutan dengan tanggal/nominal sesuai, atau pasangan ambigu'
+    for k in blocked_receipts:
+        if audit.at[k, 'Status_Pencocokan'] != 'Cocok':
+            audit.at[k, 'Keterangan_Pencocokan'] = 'Referensi cocok tetapi nominal bank dan Kasda berbeda'
+    include = bank['ID_Transaksi'].isin(detected_ids | promoted)
+    remaining = bank[~include].copy()
+    if 'Keterangan' not in remaining:
+        remaining['Keterangan'] = ''
+    remaining['Jenis_Baris'] = 'Transaksi bank'
+    remaining.loc[remaining['Keterangan'].fillna('') == '', 'Keterangan'] = 'Narasi belum terdeteksi sebagai pembayaran sewa; perlu cek manual'
+    remaining.loc[remaining['ID_Transaksi'].isin([bank.at[b, 'ID_Transaksi'] for b in candidates]), 'Keterangan'] = 'Tidak ditemukan pasangan Kasda dengan tanggal/nominal sesuai, atau pasangan urutan ambigu'
+    for b, reason in reference_errors.items():
+        remaining.loc[remaining['ID_Transaksi'] == bank.at[b, 'ID_Transaksi'], 'Keterangan'] = reason
+    unmatched_receipts = audit[audit['Status_Pencocokan'] != 'Cocok'].copy()
+    if not unmatched_receipts.empty:
+        unmatched_receipts['Jenis_Baris'] = 'Kasda tanpa pasangan bank'
+        unmatched_receipts['Keterangan'] = unmatched_receipts['Keterangan_Pencocokan']
+        # No bank credit is invented for an unmatched receipt. Its source amount
+        # stays in Jumlah_Kasda so Cek Manual does not double-count bank money.
+        remaining = pd.concat([remaining, unmatched_receipts], ignore_index=True)
+    return bank[include].reset_index(drop=True), remaining.reset_index(drop=True), audit

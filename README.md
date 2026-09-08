@@ -2,6 +2,26 @@
 
 Aplikasi web untuk memproses data penerimaan rusun dari PDF Bank Statement dan mengintegrasikannya dengan Excel Master.
 
+## Upload Kasda Sewa (opsional)
+
+Di bawah upload PDF terdapat upload **Kasda Sewa**, misalnya file `rekap-pendapatan-2026-09-04 (2).xlsx`.
+Pilih tahun master yang akan diproses, unggah master pada slot tahunnya, lalu jalankan proses otomatis.
+
+- Aplikasi membaca baris penerimaan pada sheet `Sewa`; judul kelompok rusun menentukan lokasi. Baris subtotal dan sheet `Denda` tidak dihitung lagi sebagai transaksi.
+- Nomor referensi QRIS (enam karakter terakhir) atau VA dicocokkan dengan rekening koran, beserta tanggal dan nominal pembayaran.
+- Jika referensi belum cocok, `WAKTU BAYAR` diurutkan dari paling awal dan dicocokkan dengan urutan pembayaran di PDF. Baris dengan nominal berbeda dilewati, kemudian pencocokan dilanjutkan ke baris berikutnya. Jumlah baris kedua sumber boleh berbeda. Tanggal/metode harus sesuai, pasangan referensi tetap menjadi batas urutan, dan pasangan ambigu tidak dipaksakan.
+- Narasi `Payment QRIS ... MPAN ... RETRIBUSI` dibedakan dari pelimpahan yang hanya menyebut QRIS. VA mendukung kanal TLR maupun MBL. Transaksi debit dan transfer lain tidak memakai pasangan urutan Kasda.
+- Transaksi bank yang tidak cocok dan penerimaan Kasda tanpa pasangan masuk `Cek Manual`, disertai alasan serta jenis sumber. Nominal sumber Kasda disimpan di `Jumlah_Kasda`, tanpa menciptakan kredit bank tambahan.
+- Baris yang gagal menemukan kode/periode pada master dipindahkan ke `Cek Manual` sebelum perhitungan denda. Semua baris yang belum terdeteksi tersebut tidak masuk `Status_Input`, Kasda/Denda otomatis, atau input master.
+- Kode hunian dibentuk dari kelompok rusun, GD, LT, dan UNIT. Bulan/tahun sewa diambil dari kolom `BULAN`, bukan tahun anggaran atau tanggal pembayaran.
+- Transaksi yang cocok masuk `Status_Input` dan mengikuti aturan input master yang sama. Sel tujuan yang sudah terisi tetap berstatus `Skip - Sudah Terisi`.
+- Pada baris baru yang diinput ke Master 2025/2026, kolom `KETERANGAN` otomatis diisi `QRIS` atau `VA`. Pewarnaan pelunasan disesuaikan: `#C5D9F1` (biru muda) untuk QRIS dan `#D9B5CA` (ungu muda) untuk VA.
+- Sheet tambahan `Pencocokan Kasda` mencatat semua penerimaan Kasda, ID transaksi bank, cara pencocokan, serta alasan bila belum cocok. Kolom sumber dan referensi juga tersedia di `Status_Input`.
+- Nama penghuni, tarif, dan perhitungan denda tetap mengikuti master sesuai periode. `Denda_Kasda` disertakan sebagai pembanding.
+
+Untuk memproses file lokal tanpa browser, gunakan `python scripts/process_files.py --help`.
+Hasil ditulis ke folder baru; checksum file sumber diperiksa agar master dan rekening koran asli tetap utuh.
+
 ## 🚀 Fitur Utama
 
 - **Upload PDF Bank Statement**: Ekstraksi otomatis data transaksi dengan algoritma yang sama persis seperti test3.ipynb

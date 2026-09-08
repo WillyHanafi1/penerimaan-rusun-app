@@ -16,6 +16,7 @@ from datetime import datetime
 import tempfile
 import os
 import shutil
+from kasda_matching import read_kasda_sewa, reconcile_kasda_sewa
 
 # Konfigurasi halaman
 st.set_page_config(
@@ -322,7 +323,7 @@ def process_pdf(pdf_path):
             
             if matching_cols:
                 for col in matching_cols:
-                    print(f"📅 Memformat kolom tanggal: {col} ke format mm/dd/yyyy")
+                    print(f"Memformat kolom tanggal: {col} ke format mm/dd/yyyy")
                     # Terapkan format tanggal
                     df_bank[col] = df_bank[col].apply(format_date_column)
         
@@ -332,6 +333,11 @@ def process_pdf(pdf_path):
 
 def process_setortunai(df_bank):
     """Memproses data SETORTUNAI dari dataframe bank (sama persis dengan test3.ipynb cell 2)"""
+    df_bank = df_bank.copy().reset_index(drop=True)
+    if 'Urutan_Rekening_Koran' not in df_bank.columns:
+        df_bank['Urutan_Rekening_Koran'] = list(range(1, len(df_bank) + 1))
+    if 'ID_Transaksi' not in df_bank.columns:
+        df_bank['ID_Transaksi'] = [f"BANK-{i+1:06d}" for i in range(len(df_bank))]
     
     # FIX 1: Deteksi kolom narasi secara fleksibel (tidak asumsi nama pasti 'Narasi')
     narasi_col = None
@@ -494,6 +500,15 @@ def process_setortunai(df_bank):
     
     return df_setortunai, df_non_rusun
 
+def process_bank_sources(df_bank, kasda_path=None):
+    """Gabungkan deteksi narasi dan Kasda tanpa menggandakan transaksi bank."""
+    detected, manual = process_setortunai(df_bank)
+    detected['Sumber_Deteksi'] = 'Narasi SETORTUNAI'
+    if kasda_path is None:
+        return detected, manual, None
+    kasda = read_kasda_sewa(kasda_path)
+    return reconcile_kasda_sewa(detected, manual, kasda)
+
 def filter_incomplete_data(df_setortunai, df_non_rusun, supported_years=None):
     """Filter data yang tidak lengkap dan tahun yang tidak didukung"""
     # Jika tidak ada data yang perlu diproses, kembalikan data apa adanya
@@ -562,6 +577,12 @@ def filter_incomplete_data(df_setortunai, df_non_rusun, supported_years=None):
     
     # Gabungkan dengan data non-rusun
     df_non_rusun_new = pd.concat([df_non_rusun, df_setortunai_to_move], ignore_index=True)
+    if 'Jenis_Baris' not in df_non_rusun_new:
+        df_non_rusun_new['Jenis_Baris'] = 'Transaksi bank'
+    else:
+        df_non_rusun_new['Jenis_Baris'] = df_non_rusun_new['Jenis_Baris'].fillna('Transaksi bank')
+    if 'Urutan_Rekening_Koran' in df_non_rusun_new:
+        df_non_rusun_new = df_non_rusun_new.sort_values('Urutan_Rekening_Koran', kind='stable')
     
     return df_setortunai_complete.reset_index(drop=True), df_non_rusun_new.reset_index(drop=True)
 
@@ -765,8 +786,25 @@ def extract_from_master_excel(df_setortunai, master_files):
     df_setortunai = df_setortunai.reset_index(drop=True)
     extraction_results = extraction_results.reset_index(drop=True)
     df_with_extract = pd.concat([df_setortunai, extraction_results], axis=1)
+    for workbook in workbooks.values():
+        workbook.close()
     
     return df_with_extract
+
+def filter_unmatched_master(df_with_extract, df_manual):
+    """Keep failed master lookups out of status, denda and master input entirely."""
+    columns = ['Nama Penghuni', 'Tanggal Perjanjian Sewa', 'Sewa Hunian', 'Sewa Lahan Lantai 1']
+    missing = df_with_extract[columns].isna().all(axis=1)
+    rejected = df_with_extract[missing].copy()
+    if not rejected.empty:
+        rejected['Jenis_Baris'] = 'Transaksi bank'
+        rejected['Keterangan'] = rejected.apply(
+            lambda row: f"Data master tidak ditemukan/tidak dapat dibaca: tahun {row['Tahun']}, "
+                        f"kode {row['Kode_8_Digit']}, bulan {row['Bulan']}", axis=1)
+        df_manual = pd.concat([df_manual, rejected], ignore_index=True)
+    if 'Urutan_Rekening_Koran' in df_manual:
+        df_manual = df_manual.sort_values('Urutan_Rekening_Koran', kind='stable')
+    return df_with_extract[~missing].reset_index(drop=True), df_manual.reset_index(drop=True)
 
 def calculate_denda(df_with_extract):
     """Kalkulasi denda berdasarkan selisih Credit Transaction dengan total sewa"""
@@ -844,7 +882,7 @@ def calculate_denda(df_with_extract):
     
     return df_with_extract
 
-def input_to_excel_master(df_final, master_files):
+def input_to_excel_master(df_final, master_files, output_dir=None):
     """Input data ke Excel Master dengan backup dan pewarnaan (disesuaikan dengan code baru) - OPTIMIZED VERSION"""
     import shutil
     import os
@@ -856,20 +894,36 @@ def input_to_excel_master(df_final, master_files):
     def get_month_columns(bulan):
         """Mengembalikan kolom-kolom target berdasarkan bulan."""
         month_mapping = {
-            'Januari': {'posting_date_cols': ['P', 'Q'], 'denda_col': 'M', 'tambahan_col': 'R', 'color_range': ['I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R']},
-            'Februari': {'posting_date_cols': ['Z', 'AA'], 'denda_col': 'W', 'tambahan_col': 'AB', 'color_range': ['S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AA', 'AB']},
-            'Maret': {'posting_date_cols': ['AJ', 'AK'], 'denda_col': 'AG', 'tambahan_col': 'AL', 'color_range': ['AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ', 'AK', 'AL']},
-            'April': {'posting_date_cols': ['AT', 'AU'], 'denda_col': 'AQ', 'tambahan_col': 'AV', 'color_range': ['AM', 'AN', 'AO', 'AP', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AV']},
-            'Mei': {'posting_date_cols': ['BD', 'BE'], 'denda_col': 'BA', 'tambahan_col': 'BF', 'color_range': ['AW', 'AX', 'AY', 'AZ', 'BA', 'BB', 'BC', 'BD', 'BE', 'BF']},
-            'Juni': {'posting_date_cols': ['BN', 'BO'], 'denda_col': 'BK', 'tambahan_col': 'BP', 'color_range': ['BG', 'BH', 'BI', 'BJ', 'BK', 'BL', 'BM', 'BN', 'BO', 'BP']},
-            'Juli': {'posting_date_cols': ['BX', 'BY'], 'denda_col': 'BU', 'tambahan_col': 'BZ', 'color_range': ['BQ', 'BR', 'BS', 'BT', 'BU', 'BV', 'BW', 'BX', 'BY', 'BZ']},
-            'Agustus': {'posting_date_cols': ['CH', 'CI'], 'denda_col': 'CE', 'tambahan_col': 'CJ', 'color_range': ['CA', 'CB', 'CC', 'CD', 'CE', 'CF', 'CG', 'CH', 'CI', 'CJ']},
-            'September': {'posting_date_cols': ['CR', 'CS'], 'denda_col': 'CO', 'tambahan_col': 'CT', 'color_range': ['CK', 'CL', 'CM', 'CN', 'CO', 'CP', 'CQ', 'CR', 'CS', 'CT']},
-            'Oktober': {'posting_date_cols': ['DB', 'DC'], 'denda_col': 'CY', 'tambahan_col': 'DD', 'color_range': ['CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DA', 'DB', 'DC', 'DD']},
-            'November': {'posting_date_cols': ['DL', 'DM'], 'denda_col': 'DI', 'tambahan_col': 'DN', 'color_range': ['DE', 'DF', 'DG', 'DH', 'DI', 'DJ', 'DK', 'DL', 'DM', 'DN']},
-            'Desember': {'posting_date_cols': ['DV', 'DW'], 'denda_col': 'DS', 'tambahan_col': 'DX', 'color_range': ['DO', 'DP', 'DQ', 'DR', 'DS', 'DT', 'DU', 'DV', 'DW', 'DX']}
+            'Januari': {'posting_date_cols': ['P', 'Q'], 'denda_col': 'M', 'tambahan_col': 'R', 'keterangan_col': 'O', 'color_range': ['I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R']},
+            'Februari': {'posting_date_cols': ['Z', 'AA'], 'denda_col': 'W', 'tambahan_col': 'AB', 'keterangan_col': 'Y', 'color_range': ['S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AA', 'AB']},
+            'Maret': {'posting_date_cols': ['AJ', 'AK'], 'denda_col': 'AG', 'tambahan_col': 'AL', 'keterangan_col': 'AI', 'color_range': ['AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ', 'AK', 'AL']},
+            'April': {'posting_date_cols': ['AT', 'AU'], 'denda_col': 'AQ', 'tambahan_col': 'AV', 'keterangan_col': 'AS', 'color_range': ['AM', 'AN', 'AO', 'AP', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AV']},
+            'Mei': {'posting_date_cols': ['BD', 'BE'], 'denda_col': 'BA', 'tambahan_col': 'BF', 'keterangan_col': 'BC', 'color_range': ['AW', 'AX', 'AY', 'AZ', 'BA', 'BB', 'BC', 'BD', 'BE', 'BF']},
+            'Juni': {'posting_date_cols': ['BN', 'BO'], 'denda_col': 'BK', 'tambahan_col': 'BP', 'keterangan_col': 'BM', 'color_range': ['BG', 'BH', 'BI', 'BJ', 'BK', 'BL', 'BM', 'BN', 'BO', 'BP']},
+            'Juli': {'posting_date_cols': ['BX', 'BY'], 'denda_col': 'BU', 'tambahan_col': 'BZ', 'keterangan_col': 'BW', 'color_range': ['BQ', 'BR', 'BS', 'BT', 'BU', 'BV', 'BW', 'BX', 'BY', 'BZ']},
+            'Agustus': {'posting_date_cols': ['CH', 'CI'], 'denda_col': 'CE', 'tambahan_col': 'CJ', 'keterangan_col': 'CG', 'color_range': ['CA', 'CB', 'CC', 'CD', 'CE', 'CF', 'CG', 'CH', 'CI', 'CJ']},
+            'September': {'posting_date_cols': ['CR', 'CS'], 'denda_col': 'CO', 'tambahan_col': 'CT', 'keterangan_col': 'CQ', 'color_range': ['CK', 'CL', 'CM', 'CN', 'CO', 'CP', 'CQ', 'CR', 'CS', 'CT']},
+            'Oktober': {'posting_date_cols': ['DB', 'DC'], 'denda_col': 'CY', 'tambahan_col': 'DD', 'keterangan_col': 'DA', 'color_range': ['CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DA', 'DB', 'DC', 'DD']},
+            'November': {'posting_date_cols': ['DL', 'DM'], 'denda_col': 'DI', 'tambahan_col': 'DN', 'keterangan_col': 'DK', 'color_range': ['DE', 'DF', 'DG', 'DH', 'DI', 'DJ', 'DK', 'DL', 'DM', 'DN']},
+            'Desember': {'posting_date_cols': ['DV', 'DW'], 'denda_col': 'DS', 'tambahan_col': 'DX', 'keterangan_col': 'DU', 'color_range': ['DO', 'DP', 'DQ', 'DR', 'DS', 'DT', 'DU', 'DV', 'DW', 'DX']}
         }
         return month_mapping.get(bulan)
+
+    def determine_payment_method(row):
+        """Menentukan metode pembayaran (QRIS, VA, atau lainnya)."""
+        kasda_method = str(row.get('Metode_Bayar_Kasda') or '').strip().upper()
+        if kasda_method in ('QRIS', 'VA'):
+            return kasda_method
+        direct_method = str(row.get('Metode_Bayar') or '').strip().upper()
+        if direct_method in ('QRIS', 'VA'):
+            return direct_method
+        narasi = str(row.get('Narasi') or '').upper()
+        compact = re.sub(r'\s+', '', narasi)
+        if 'PAYMENTQRIS' in compact or 'QRIS' in narasi or 'QRP-' in narasi:
+            return 'QRIS'
+        if 'PAYVA' in compact or 'PAY VA' in narasi:
+            return 'VA'
+        return None
 
     def get_sheet_name(kode_2_digit):
         """Mengembalikan nama sheet berdasarkan 2 digit pertama kode."""
@@ -895,9 +949,12 @@ def input_to_excel_master(df_final, master_files):
 
     def create_backup_file(original_file):
         """Membuat backup file dengan timestamp."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         name, ext = os.path.splitext(original_file)
         backup_path = f"{name}_BACKUP_{timestamp}{ext}"
+        if output_dir is not None:
+            os.makedirs(output_dir, exist_ok=True)
+            backup_path = os.path.join(output_dir, f"{os.path.basename(name)}_Updated{ext}")
         shutil.copy2(original_file, backup_path)
         return backup_path
 
@@ -915,6 +972,8 @@ def input_to_excel_master(df_final, master_files):
     def input_data_to_excel_v2_silent_optimized(df_data):
         """Versi yang dioptimasi: Input data ke Excel dengan minimal I/O operations."""
         results = {'success': 0, 'skipped': 0, 'failed': 0, 'errors': [], 'skipped_details': [], 'success_details': [], 'failed_details': [], 'backup_files': {}}
+        def identity(row):
+            return {'ID_Transaksi': row.get('ID_Transaksi', ''), 'Tahun': str(row['Tahun'])}
         
         # Group data by year for batch processing
         for tahun, group_data in df_data.groupby('Tahun'):
@@ -931,6 +990,7 @@ def input_to_excel_master(df_final, master_files):
                 for _, row in group_data.iterrows():
                     results['failed'] += 1
                     results['failed_details'].append({
+                        **identity(row),
                         'Kode_8_Digit': str(row.get('Kode_8_Digit', '')),
                         'Bulan': str(row.get('Bulan', '')),
                         'Tanggal': str(row.get('Tanggal', '')),
@@ -945,6 +1005,7 @@ def input_to_excel_master(df_final, master_files):
                 backup_path = create_backup_file(excel_file)
                 results['backup_files'][str(tahun)] = backup_path
                 workbook = openpyxl.load_workbook(backup_path)
+                success_before_year = results['success']
                 
                 # Cache all worksheets to avoid repeated sheet access
                 worksheets_cache = {}
@@ -965,12 +1026,12 @@ def input_to_excel_master(df_final, master_files):
 
                     if not all([d1, sheet_name, month_cols]):
                         results['failed'] += 1
-                        results['failed_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': 'Kode/Sheet/Bulan tidak valid'})
+                        results['failed_details'].append({**identity(row), 'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': 'Kode/Sheet/Bulan tidak valid'})
                         continue
 
                     if sheet_name not in worksheets_cache:
                         results['failed'] += 1
-                        results['failed_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f"Sheet '{sheet_name}' tidak ada"})
+                        results['failed_details'].append({**identity(row), 'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f"Sheet '{sheet_name}' tidak ada"})
                         continue
 
                     # Use cached worksheet
@@ -978,7 +1039,7 @@ def input_to_excel_master(df_final, master_files):
                     target_row = find_row_by_code(worksheet, d2, d3, d4)
                     if not target_row:
                         results['failed'] += 1
-                        results['failed_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f'Kombinasi kode tidak ditemukan'})
+                        results['failed_details'].append({**identity(row), 'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f'Kombinasi kode tidak ditemukan'})
                         continue
                     
                     pdc1, pdc2, dc, tc = month_cols['posting_date_cols'][0], month_cols['posting_date_cols'][1], month_cols['denda_col'], month_cols['tambahan_col']
@@ -986,7 +1047,7 @@ def input_to_excel_master(df_final, master_files):
                     
                     if is_cell_filled(worksheet, c1_addr) or is_cell_filled(worksheet, c2_addr) or is_cell_filled(worksheet, c3_addr):
                         results['skipped'] += 1
-                        results['skipped_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f"Sudah terisi di {sheet_name} baris {target_row}"})
+                        results['skipped_details'].append({**identity(row), 'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f"Sudah terisi di {sheet_name} baris {target_row}"})
                         continue
                     
                     try:
@@ -1010,17 +1071,51 @@ def input_to_excel_master(df_final, master_files):
                         worksheet[c3_addr] = denda
                         worksheet[c4_addr] = 1  # Tambahan angka 1
                         
-                        # Apply formatting in memory (pewarnaan)
+                        # Isi kolom Keterangan untuk metode QRIS / VA
+                        payment_method = determine_payment_method(row)
+                        kc = month_cols.get('keterangan_col')
+                        if kc and payment_method:
+                            c5_addr = f'{kc}{target_row}'
+                            existing_ket = str(worksheet[c5_addr].value or '').strip()
+                            if existing_ket:
+                                if payment_method.lower() not in existing_ket.lower():
+                                    worksheet[c5_addr] = f"{existing_ket}, {payment_method}"
+                            else:
+                                worksheet[c5_addr] = payment_method
+                        
+                        # Apply formatting in memory (pewarnaan berdasarkan metode bayar)
+                        # QRIS: #C5D9F1, VA: #D9B5CA, Lainnya: #D8E4BC
                         from openpyxl.styles import PatternFill
-                        fill_color = PatternFill(start_color='D8E4BC', end_color='D8E4BC', fill_type='solid')
+                        if payment_method == 'QRIS':
+                            fill_hex = 'C5D9F1'
+                        elif payment_method == 'VA':
+                            fill_hex = 'D9B5CA'
+                        else:
+                            fill_hex = 'D8E4BC'
+                            
+                        fill_color = PatternFill(start_color=fill_hex, end_color=fill_hex, fill_type='solid')
                         for col in month_cols['color_range']:
                             worksheet[f'{col}{target_row}'].fill = fill_color
                         
                         results['success'] += 1
-                        results['success_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Sheet': sheet_name, 'Row': target_row, 'Denda': denda})
+                        results['success_details'].append({
+                            **identity(row),
+                            'Kode_8_Digit': kode,
+                            'Bulan': bulan,
+                            'Sheet': sheet_name,
+                            'Row': target_row,
+                            'Denda': denda,
+                            'Metode_Bayar': payment_method
+                        })
                     except Exception as e:
                         results['failed'] += 1
-                        results['failed_details'].append({'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f'Error input: {str(e)}'})
+                        results['failed_details'].append({**identity(row), 'Kode_8_Digit': kode, 'Bulan': bulan, 'Reason': f'Error input: {str(e)}'})
+
+                # Keep an all-skipped master byte-for-byte intact, including cached
+                # formulas and merged-cell formatting that a resave can alter.
+                if results['success'] == success_before_year:
+                    workbook.close()
+                    continue
 
                 # Hide columns A, B, C, D in all relevant sheets before saving
                 for sheet_name in ['CIGUGUR', 'MELONG', 'LG ']:
@@ -1034,6 +1129,7 @@ def input_to_excel_master(df_final, master_files):
                 
                 # OPTIMIZATION: Save workbook ONCE after all changes are done
                 workbook.save(backup_path)
+                workbook.close()
                 
             except Exception as e:
                 results['errors'].append(f"Error proses file tahun {tahun}: {str(e)}")
@@ -1061,7 +1157,7 @@ def input_to_excel_master(df_final, master_files):
     # FIX 4b: kembalikan valid_data (bukan df_final) agar Status_Input sheet berisi data yang diproses
     return valid_data, results
 
-def create_export_excel(results, valid_data, df_final, df_non_rusun):
+def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_audit=None, output_dir=None):
     """Membuat file Excel hasil dengan beberapa sheet"""
     
     # FIX 3: Helper akses kolom DataFrame secara aman
@@ -1077,12 +1173,20 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
     df_export_status['Keterangan_Input'] = ''
     # FIX: Inisialisasi sebagai float, bukan string kosong, untuk mencegah Dtype error di Pandas 3.0
     df_export_status['Nilai_Denda_Input'] = 0.0
+    def status_mask(detail):
+        if detail.get('ID_Transaksi') and 'ID_Transaksi' in df_export_status:
+            return df_export_status['ID_Transaksi'] == detail['ID_Transaksi']
+        mask = ((df_export_status['Kode_8_Digit'] == detail['Kode_8_Digit']) &
+                (df_export_status['Bulan'] == detail['Bulan']))
+        if 'Tahun' in detail:
+            mask &= df_export_status['Tahun'].astype(str) == str(detail['Tahun'])
+        return mask
     
     # Update status berdasarkan hasil
     for success_detail in results.get('success_details', []):
         kode = success_detail['Kode_8_Digit']
         bulan = success_detail['Bulan']
-        mask = (df_export_status['Kode_8_Digit'] == kode) & (df_export_status['Bulan'] == bulan)
+        mask = status_mask(success_detail)
         df_export_status.loc[mask, 'Status_Input'] = 'Berhasil Input'
         df_export_status.loc[mask, 'Keterangan_Input'] = f"Data berhasil diinput ke {success_detail['Sheet']} row {success_detail['Row']}"
         df_export_status.loc[mask, 'Nilai_Denda_Input'] = success_detail['Denda']
@@ -1090,14 +1194,14 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
     for skip_detail in results.get('skipped_details', []):
         kode = skip_detail['Kode_8_Digit']
         bulan = skip_detail['Bulan']
-        mask = (df_export_status['Kode_8_Digit'] == kode) & (df_export_status['Bulan'] == bulan)
+        mask = status_mask(skip_detail)
         df_export_status.loc[mask, 'Status_Input'] = 'Skip - Sudah Terisi'
         df_export_status.loc[mask, 'Keterangan_Input'] = skip_detail['Reason']
     
     for failed_detail in results.get('failed_details', []):
         kode = failed_detail['Kode_8_Digit']
         bulan = failed_detail['Bulan']
-        mask = (df_export_status['Kode_8_Digit'] == kode) & (df_export_status['Bulan'] == bulan)
+        mask = status_mask(failed_detail)
         df_export_status.loc[mask, 'Status_Input'] = 'Gagal'
         df_export_status.loc[mask, 'Keterangan_Input'] = failed_detail['Reason']
     
@@ -1226,7 +1330,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
     
     # Export ke file Excel
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_dir = os.path.join(tempfile.gettempdir(), "rusun_app", "output")
+    temp_dir = output_dir or os.path.join(tempfile.gettempdir(), "rusun_app", "output")
     os.makedirs(temp_dir, exist_ok=True)
     export_filename = os.path.join(temp_dir, f"Status_Input_Excel_{timestamp}.xlsx")
     
@@ -1254,6 +1358,8 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         # Sheet 4: Data Denda
         if len(df_denda_export) > 0:
             df_denda_export.to_excel(writer, sheet_name='Denda', index=False)
+        if df_kasda_audit is not None:
+            df_kasda_audit.to_excel(writer, sheet_name='Pencocokan Kasda', index=False)
         
         # Format Excel dengan numeric format
         workbook = writer.book
@@ -1264,7 +1370,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         month_year_format = 'MMM-YY'  # BARU: Format tampilan Bulan-Tahun
 
         # 2. Definisikan kolom-kolom tanggal
-        date_cols = ['Tanggal Setor', 'Tanggal Kasda', 'Tanggal Perjanjian']
+        date_cols = ['Tanggal Setor', 'Tanggal Kasda', 'Tanggal Perjanjian', 'Tanggal_Kasda']
         
         # 3. Definisikan kolom-kolom uang per sheet
         money_cols = {
@@ -1277,15 +1383,23 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun):
         # 4. Mapping sheet ke dataframe
         sheets_to_write = {
             'Status_Input': df_export_status,
-            'Cek Manual': df_non_rusun if len(df_non_rusun) > 0 else pd.DataFrame(),
+            'Cek Manual': df_non_rusun_final,
             'Kasda': df_kasda_export,
             'Denda': df_denda_export if len(df_denda_export) > 0 else pd.DataFrame()
         }
+        if df_kasda_audit is not None:
+            sheets_to_write['Pencocokan Kasda'] = df_kasda_audit
+            money_cols['Pencocokan Kasda'] = ['Jumlah_Kasda', 'Denda_Kasda']
         
         # Loop melalui setiap sheet untuk menerapkan format
         for sheet_name, df_to_format in sheets_to_write.items():
             if sheet_name in workbook.sheetnames and not df_to_format.empty:
                 worksheet = workbook[sheet_name]
+                for col_name in ['Kode_8_Digit', 'No_Referensi_Kasda', 'ID_Transaksi']:
+                    if col_name in df_to_format.columns:
+                        col_idx = df_to_format.columns.get_loc(col_name) + 1
+                        for row_num in range(2, len(df_to_format) + 2):
+                            worksheet.cell(row_num, col_idx).number_format = '@'
                 
                 # Terapkan format angka untuk kolom uang
                 sheet_money_cols = money_cols.get(sheet_name, [])
@@ -1428,8 +1542,14 @@ def main():
         
         # Tahap 2: Data SETORTUNAI
         if st.session_state.df_setortunai is not None:
-            with st.expander(f"🔍 Tahap 2: Data SETORTUNAI Terdeteksi ({len(st.session_state.df_setortunai)} Baris)"):
+            with st.expander(f"🔍 Tahap 2: Transaksi Terdeteksi dari Narasi / Kasda ({len(st.session_state.df_setortunai)} Baris)"):
                 show_dataframe_preview(st.session_state.df_setortunai)
+        kasda_audit = st.session_state.get('df_kasda_audit')
+        if kasda_audit is not None:
+            matched = int((kasda_audit['Status_Pencocokan'] == 'Cocok').sum())
+            st.info(f"Kasda Sewa: {matched} dari {len(kasda_audit)} penerimaan cocok dengan rekening koran.")
+            with st.expander("Pencocokan Kasda Sewa"):
+                show_dataframe_preview(kasda_audit)
         
         # Tahap 3: Data Final & Denda
         if st.session_state.df_final is not None:
@@ -1467,6 +1587,13 @@ def main():
             if bank_file:
                 st.success(f"✅ File terpilih: {bank_file.name}")
                 st.info(f"📊 Ukuran: {bank_file.size:,} bytes")
+            kasda_file = st.file_uploader(
+                "Pilih file Kasda Sewa (opsional)",
+                type=["xlsx"],
+                key="kasda_sewa_file",
+                help="Upload rekap pendapatan dengan sheet Sewa. Penerimaan dicocokkan melalui referensi atau urutan Waktu Bayar, dengan pemeriksaan tanggal dan nominal.",
+            )
+            st.caption("Kasda Sewa melengkapi transaksi QRIS/VA agar penghuni dan periode sewanya ikut terdeteksi.")
         
         with col2:
             st.markdown("#### 📊 Master Excel")
@@ -1516,10 +1643,11 @@ def main():
                     progress_bar.progress(10)
                     
                     temp_pdf = save_uploadedfile_temp(bank_file, "bank_files")
+                    temp_kasda = save_uploadedfile_temp(kasda_file, "kasda_sewa") if kasda_file else None
                     
                     master_files = {}
                     for year, file_obj in uploaded_masters.items():
-                        temp_path = save_uploadedfile_temp(file_obj, "Master Data")
+                        temp_path = save_uploadedfile_temp(file_obj, os.path.join("Master Data", str(year)))
                         master_files[str(year)] = temp_path
                     
                     # Step 2: Proses PDF
@@ -1533,10 +1661,10 @@ def main():
                         return
                     
                     # Step 3: Ekstrak SETORTUNAI
-                    status_text.info(f"🔄 **Langkah 3/6:** Mengekstrak data SETORTUNAI dari {len(df_bank)} transaksi...")
+                    status_text.info(f"🔄 **Langkah 3/6:** Mendeteksi narasi dan mencocokkan Kasda Sewa dari {len(df_bank)} transaksi...")
                     progress_bar.progress(35)
                     
-                    df_setortunai, df_non_rusun = process_setortunai(df_bank)
+                    df_setortunai, df_non_rusun, df_kasda_audit = process_bank_sources(df_bank, temp_kasda)
                     
                     # Step 4: Filter data dan ekstrak dari Master
                     status_text.info("🔄 **Langkah 4/6:** Memfilter data dan mengekstrak dari Master Excel...")
@@ -1548,6 +1676,7 @@ def main():
                     
                     if master_files:
                         df_with_extract = extract_from_master_excel(df_setortunai_filtered, master_files)
+                        df_with_extract, df_non_rusun_new = filter_unmatched_master(df_with_extract, df_non_rusun_new)
                     else:
                         df_with_extract = df_setortunai_filtered
                         df_with_extract['Nama Penghuni'] = None
@@ -1577,7 +1706,7 @@ def main():
                     status_text.info("🔄 **Langkah 6/6:** Membuat file export hasil...")
                     progress_bar.progress(85)
                     
-                    export_file = create_export_excel(results, valid_data, df_final, df_non_rusun_new)
+                    export_file = create_export_excel(results, valid_data, df_final, df_non_rusun_new, df_kasda_audit)
                     
                     # Simpan hasil ke session state
                     st.session_state.df_bank = df_bank
@@ -1588,6 +1717,7 @@ def main():
                     st.session_state.results = results
                     st.session_state.export_file = export_file
                     st.session_state.master_files = master_files
+                    st.session_state.df_kasda_audit = df_kasda_audit
                     
                     # Selesai
                     progress_bar.progress(100)
@@ -1600,7 +1730,7 @@ def main():
                     with col1:
                         st.metric("📊 Total Transaksi", len(df_bank))
                     with col2:
-                        st.metric("🏢 Data SETORTUNAI", len(df_setortunai))
+                        st.metric("🏢 Transaksi Terdeteksi", len(df_setortunai))
                     with col3:
                         st.metric("📄 Data NON-RUSUN", len(df_non_rusun_new))
                     with col4:
@@ -1632,6 +1762,7 @@ def main():
                 
                 1. 📄 **Ekstraksi PDF** - Mengambil data transaksi dari PDF Bank Statement
                 2. 🔍 **Ekstraksi SETORTUNAI** - Memisahkan data rusun dan non-rusun
+                   Kasda Sewa opsional melengkapi transaksi QRIS/VA melalui referensi atau urutan waktu dengan tanggal dan nominal yang sama.
                 3. 🛠️ **Filter Data** - Memfilter data lengkap dan tahun yang didukung
                 4. 📊 **Ekstrak Master** - Mengambil data dari Master Excel (jika tersedia)
                 5. 💰 **Kalkulasi Denda** - Menghitung denda berdasarkan selisih pembayaran
