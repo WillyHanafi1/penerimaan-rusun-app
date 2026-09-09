@@ -20,6 +20,12 @@ MONTH_ALIASES = {
     'nov': 11, 'nop': 11, 'november': 11, 'des': 12, 'dec': 12, 'desember': 12,
 }
 
+# Nomor VA rusun: prefix 1295 + kode hunian 8 digit + periode MMYY.
+# Contoh: 1295 02010417 0726 = unit 02010417, Juli 2026.
+VA_REFERENCE_PATTERN = re.compile(
+    r'(?<!\d)(1295(0[123]\d{6})(0[1-9]|1[0-2])(\d{2}))(?!\d)'
+)
+
 
 def _text(value):
     return '' if pd.isna(value) else str(value).strip()
@@ -75,6 +81,12 @@ def _time(value):
         except ValueError:
             continue
     return ''
+
+
+def _va_reference(value):
+    """Ambil nomor VA rusun yang valid dari narasi bank."""
+    match = VA_REFERENCE_PATTERN.search(re.sub(r'\s+', '', _text(value)))
+    return match.group(1) if match else ''
 
 
 def _unit_code(rusun, gedung, lantai, unit):
@@ -200,9 +212,12 @@ def reconcile_kasda_sewa(detected, manual, kasda):
     for i, row in bank.iterrows():
         narration = _text(row.get('Narasi')).upper()
         compact = re.sub(r'\s+', '', narration)
+        va_reference = _va_reference(compact)
         # A transfer/settlement mentioning QRIS is not an individual QRIS payment.
         qris_payment = 'PAYMENTQRIS' in compact and ('RETRIBUSI' in compact or 'RUSUN' in compact)
-        method = 'QRIS' if qris_payment else ('VA' if 'PAYVA' in compact else '')
+        # Sebagian bank menampilkan pembayaran VA sebagai TRF DARI BCA/SEABANK,
+        # tanpa label PAY VA. Nomor VA 16 digit tetap mengidentifikasi transaksi.
+        method = 'QRIS' if qris_payment else ('VA' if 'PAYVA' in compact or va_reference else '')
         credit, debit = _money(row.get('Credit Transaction')), _money(row.get('Debit Transaction'))
         date = _date(row.get('Posting Date'))
         if not method or credit is None or credit <= 0 or (debit is not None and debit > 0) or pd.isna(date):
@@ -212,8 +227,11 @@ def reconcile_kasda_sewa(detected, manual, kasda):
             ref = re.search(r'(?:ESB|QRP)-[A-Z0-9]+-([A-Z0-9]{6})(?=PAYMENT)', compact)
         if method == 'VA':
             # Channel may be TLR, MBL, ATM, etc.; the VA itself remains numeric.
-            ref = re.search(r'PAYVA[A-Z]*(\d{10,})', compact)
-        candidates[i] = {'date': date, 'amount': credit, 'method': method, 'ref': ref[1] if ref else ''}
+            pay_va = re.search(r'PAYVA[A-Z]*(\d{10,})', compact)
+            reference = va_reference or (pay_va[1] if pay_va else '')
+        else:
+            reference = ref[1] if ref else ''
+        candidates[i] = {'date': date, 'amount': credit, 'method': method, 'ref': reference}
 
     edges, reference_errors, blocked_receipts = {}, {}, set()
     for b, transaction in candidates.items():

@@ -7,7 +7,7 @@ import pandas as pd
 import openpyxl
 
 import app
-from kasda_matching import read_kasda_sewa, reconcile_kasda_sewa, _period, _unit_code
+from kasda_matching import read_kasda_sewa, reconcile_kasda_sewa, _period, _unit_code, _va_reference
 
 
 def bank_row(ref='ABC123', amount=400000, **kwargs):
@@ -139,6 +139,25 @@ class KasdaMatchingTests(unittest.TestCase):
         self.assertEqual(detected.iloc[0]['Tahun'], '2025')
         self.assertEqual(detected.iloc[0]['Bulan'], 'Desember')
 
+    def test_transfer_with_embedded_va_reference_is_matched(self):
+        narration = 'ATM-JALN-303058 TRF DARI BCA Erni Murningsih NO REK 1295020104170726'
+        detected, manual, audit = match(
+            [bank_row(Narasi=narration, amount=390150)],
+            [receipt(ref='1295020104170726', amount=390150, Metode_Bayar_Kasda='VA',
+                     Kode_8_Digit='02010417', Bulan='Juli', Tahun='2026')],
+        )
+        self.assertEqual(len(detected), 1)
+        self.assertTrue(manual.empty)
+        self.assertEqual(detected.iloc[0]['Kode_8_Digit'], '02010417')
+        self.assertEqual(detected.iloc[0]['Bulan'], 'Juli')
+        self.assertEqual(detected.iloc[0]['Tahun'], '2026')
+        self.assertTrue(audit.iloc[0]['Metode_Pencocokan'].startswith('Referensi'))
+
+    def test_va_reference_requires_valid_unit_prefix_and_month(self):
+        self.assertEqual(_va_reference('NO REK 1295020104170726'), '1295020104170726')
+        self.assertEqual(_va_reference('NO REK 1295999999990726'), '')
+        self.assertEqual(_va_reference('NO REK 1295020104171326'), '')
+
     def test_period_and_code_mapping(self):
         self.assertEqual(_period('Agu 26'), ('Agustus', '2026'))
         self.assertEqual(_period('Des 2025'), ('Desember', '2025'))
@@ -250,6 +269,27 @@ class KasdaMatchingTests(unittest.TestCase):
         self.assertEqual(detected['Credit Transaction'].apply(app.to_numeric_safe).sum(), 20027570)
         self.assertEqual((audit['Status_Pencocokan'] == 'Cocok').sum(), 49)
         self.assertEqual(audit['Metode_Pencocokan'].str.startswith('Urutan').sum(), 1)
+
+    @unittest.skipUnless(
+        Path('07-09-2026/rekap-pendapatan-2026-09-07.xlsx').exists()
+        and Path('07-09-2026/7-9-2026.pdf').exists(),
+        'Local September 7 inputs unavailable',
+    )
+    def test_september_7_recap_all_enters_eligible_status_flow(self):
+        folder = Path('07-09-2026')
+        bank = app.process_pdf(str(folder / '7-9-2026.pdf'))
+        detected, manual, audit = app.process_bank_sources(
+            bank, str(folder / 'rekap-pendapatan-2026-09-07.xlsx'))
+        eligible, _ = app.filter_incomplete_data(detected, manual, ['2025', '2026'])
+
+        matched_ids = set(audit.loc[audit['Status_Pencocokan'] == 'Cocok', 'ID_Transaksi'])
+        self.assertEqual(len(audit), 52)
+        self.assertEqual(len(matched_ids), 52)
+        self.assertEqual((audit['Status_Pencocokan'] == 'Cocok').sum(), 52)
+        self.assertTrue(matched_ids.issubset(set(eligible['ID_Transaksi'])))
+        self.assertEqual(len(eligible), 53)  # 52 rekap + 1 setor tunai dengan kode lengkap.
+        target = eligible[eligible['Kode_8_Digit'] == '02010417'].iloc[0]
+        self.assertEqual((target['Bulan'], target['Tahun']), ('Juli', '2026'))
 
     @unittest.skipUnless(Path('1-9-2026/1-9-2026.pdf').exists(), 'Local September 1 inputs unavailable')
     def test_september_1_mixed_transactions_have_exclusive_destinations(self):
