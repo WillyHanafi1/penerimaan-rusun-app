@@ -326,8 +326,10 @@ class KasdaMatchingTests(unittest.TestCase):
         with patch('pandas.ExcelWriter') as writer, patch.object(pd.DataFrame, 'to_excel', capture), patch('os.makedirs'):
             writer.return_value.__enter__.return_value.book = SimpleNamespace(sheetnames=[])
             app.create_export_excel(results, valid, final, manual)
-        self.assertEqual(captured['Status_Input']['ID_Transaksi'].tolist(), ['BANK-0'])
-        self.assertEqual(captured['Cek Manual']['ID_Transaksi'].tolist(), ['BANK-1'])
+        self.assertEqual(captured['Status_Input']['Kode_8_Digit'].tolist(), ['01010101'])
+        self.assertEqual(captured['Cek Manual']['Kode_8_Digit'].tolist(), ['01999999'])
+        self.assertNotIn('ID_Transaksi', captured['Status_Input'].columns)
+        self.assertNotIn('ID_Transaksi', captured['Cek Manual'].columns)
 
     @unittest.skipUnless(Path('rekap-pendapatan-2026-09-04 (2).xlsx').exists() and Path('4-9-2026.pdf').exists(), 'Local example inputs unavailable')
     def test_local_recap_reconciles_every_credit_and_preserves_the_debit(self):

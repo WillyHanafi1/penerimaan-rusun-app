@@ -13,6 +13,58 @@ from master_formula_cache import NS, save_master
 
 
 class MasterOutputTests(unittest.TestCase):
+    def test_download_omits_technical_columns_after_matching_status_and_keeps_amounts(self):
+        hidden = {
+            'Urutan_Rekening_Koran', 'ID_Transaksi', 'Narasi_Clean', 'Has_SETORTUNAI',
+            'Waktu_Bayar_Kasda', 'No_Referensi_Kasda', 'Nama_Kasda', 'Sheet_Kasda',
+            'Tanggal_Kasda', 'Tanggal_Bayar_Kasda', 'Biaya_Lain_Kasda',
+            'Nomor_Dokumen_Kasda', 'Metode_Pencocokan',
+        }
+        rows = []
+        for index in (1, 2):
+            rows.append({**dict.fromkeys(hidden, 'data teknis'),
+                'ID_Transaksi': f'BANK-{index}', 'Kode_8_Digit': '01010101',
+                'Bulan': 'Oktober', 'Tahun': '2026', 'Posting Date': '14 Oct 2026',
+                'Narasi': 'Baris pertama\nBaris kedua',
+                'Nama Penghuni': 'Penghuni dengan nama panjang untuk pemeriksaan lebar kolom',
+                'Sewa Hunian': 100000, 'Sewa Lahan Lantai 1': 0,
+                'Tanggal Perjanjian Sewa': '01/01/2026', 'Denda': 5000,
+                'Credit Transaction': 105000, 'Balance': 210000})
+        data = pd.DataFrame(rows)
+        original = data.copy(deep=True)
+        results = {
+            'success_details': [dict(ID_Transaksi='BANK-1', Kode_8_Digit='01010101',
+                Bulan='Oktober', Sheet='CIGUGUR', Row=3, Denda=5000)],
+            'skipped_details': [dict(ID_Transaksi='BANK-2', Kode_8_Digit='01010101',
+                Bulan='Oktober', Reason='Sudah terisi')],
+        }
+        for audit in (None, data):
+            with self.subTest(audit=audit is not None), tempfile.TemporaryDirectory() as folder:
+                report = app.create_export_excel(results, data, data, data.head(1), audit, folder)
+                workbook = openpyxl.load_workbook(report)
+                self.assertEqual(workbook.sheetnames, ['Status_Input', 'Cek Manual', 'Kasda', 'Denda']
+                                 + (['Pencocokan Kasda'] if audit is not None else []))
+                for sheet in workbook:
+                    headers = [cell.value for cell in sheet[1]]
+                    self.assertFalse(hidden.intersection(headers))
+                    self.assertEqual(sheet.freeze_panes, 'A2')
+                    self.assertEqual(sheet.auto_filter.ref, sheet.dimensions)
+                    self.assertTrue(all(dimension.height == 18 for dimension in sheet.row_dimensions.values()))
+                    self.assertTrue(all(not cell.alignment.wrap_text for row in sheet for cell in row))
+                status = workbook['Status_Input']
+                headers = {cell.value: cell.column for cell in status[1]}
+                self.assertEqual([status.cell(row, headers['Status_Input']).value for row in (2, 3)],
+                                 ['Berhasil Input', 'Skip - Sudah Terisi'])
+                for row in (2, 3):
+                    self.assertEqual(status.cell(row, headers['Credit Transaction']).value, 105000)
+                    self.assertEqual(status.cell(row, headers['Credit Transaction']).number_format, '#,##0')
+                    self.assertEqual(status.cell(row, headers['Kode_8_Digit']).value, '01010101')
+                    self.assertEqual(status.cell(row, headers['Kode_8_Digit']).number_format, '@')
+                    self.assertEqual(status.cell(row, headers['Narasi']).value, 'Baris pertama Baris kedua')
+                name_column = status.cell(1, headers['Nama Penghuni']).column_letter
+                self.assertGreater(status.column_dimensions[name_column].width, 18)
+        pd.testing.assert_frame_equal(data, original)
+
     def test_blank_or_zero_tariffs_do_not_turn_the_whole_payment_into_a_penalty(self):
         data = pd.DataFrame([
             {'Kode_8_Digit': f'0101010{i}', 'Bulan': 'Oktober', 'Tahun': '2026',

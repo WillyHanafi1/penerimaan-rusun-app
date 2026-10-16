@@ -20,12 +20,20 @@ Pilih tahun master yang akan diproses, unggah master pada slot tahunnya, lalu ja
 - Kode hunian dibentuk dari kelompok rusun, GD, LT, dan UNIT. Bulan/tahun sewa diambil dari kolom `BULAN`, bukan tahun anggaran atau tanggal pembayaran.
 - Transaksi yang cocok masuk `Status_Input` dan mengikuti aturan input master yang sama. Sel tujuan yang sudah terisi tetap berstatus `Skip - Sudah Terisi`.
 - Pada baris baru yang diinput ke Master 2025/2026, kolom `KETERANGAN` otomatis diisi `QRIS` atau `VA`. Pewarnaan pelunasan disesuaikan: `#C5D9F1` (biru muda) untuk QRIS dan `#D9B5CA` (ungu muda) untuk VA.
-- Sheet tambahan `Pencocokan Kasda` mencatat semua penerimaan Kasda, ID transaksi bank, cara pencocokan, serta alasan bila belum cocok. Kolom sumber dan referensi juga tersedia di `Status_Input`.
+- Sheet tambahan `Pencocokan Kasda` mencatat semua penerimaan Kasda, nominal, status pencocokan, serta alasan bila belum cocok. Kolom teknis pencocokan dipakai di dalam proses dan tidak ditampilkan pada unduhan laporan.
 - Nama penghuni, tarif, dan perhitungan denda tetap mengikuti master sesuai periode. `Denda_Kasda` disertakan sebagai pembanding.
 - Kedua master yang diunggah tetap tersedia untuk diunduh, termasuk tahun tanpa penerimaan baru. Master tanpa perubahan disalin identik. Hasil rumus tarif tetap seperti `=280000+90000` dipertahankan ketika master disimpan agar masih terbaca saat digunakan lagi untuk proses harian; rumus total tetap dihitung ulang oleh Excel. Proses ulang pada master hasil melewati sel yang sudah terisi.
 
 Untuk memproses file lokal tanpa browser, gunakan `python scripts/process_files.py --help`.
 Hasil ditulis ke folder baru; checksum file sumber diperiksa agar master dan rekening koran asli tetap utuh.
+
+Format unduhan laporan menghapus kolom teknis `Urutan_Rekening_Koran`, `ID_Transaksi`,
+`Narasi_Clean`, `Has_SETORTUNAI`, `Waktu_Bayar_Kasda`, `No_Referensi_Kasda`,
+`Nama_Kasda`, `Sheet_Kasda`, `Tanggal_Kasda`, `Tanggal_Bayar_Kasda`,
+`Biaya_Lain_Kasda`, `Nomor_Dokumen_Kasda`, dan `Metode_Pencocokan` dari seluruh sheet.
+Data tersebut tetap dipakai di dalam proses pencocokan. Semua baris laporan memiliki
+tinggi 18, tanpa wrap text, dengan lebar kolom menyesuaikan isi.
+Pemisah baris di narasi unduhan diganti spasi agar seluruh teks tampil dalam satu baris.
 
 ## 🚀 Fitur Utama
 

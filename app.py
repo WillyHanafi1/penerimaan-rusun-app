@@ -1170,6 +1170,14 @@ def input_to_excel_master(df_final, master_files, output_dir=None):
     # FIX 4b: kembalikan valid_data (bukan df_final) agar Status_Input sheet berisi data yang diproses
     return valid_data, results
 
+REPORT_EXCLUDED_COLUMNS = frozenset({
+    'Urutan_Rekening_Koran', 'ID_Transaksi', 'Narasi_Clean', 'Has_SETORTUNAI',
+    'Waktu_Bayar_Kasda', 'No_Referensi_Kasda', 'Nama_Kasda', 'Sheet_Kasda',
+    'Tanggal_Kasda', 'Tanggal_Bayar_Kasda', 'Biaya_Lain_Kasda',
+    'Nomor_Dokumen_Kasda', 'Metode_Pencocokan',
+})
+
+
 def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_audit=None, output_dir=None):
     """Membuat file Excel hasil dengan beberapa sheet"""
     
@@ -1263,32 +1271,21 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
         except:
             return '', '', ''
     
-    # BARU: Fungsi untuk menyesuaikan lebar kolom
-    def auto_adjust_column_width(worksheet):
-        """Menyesuaikan lebar kolom di worksheet berdasarkan konten terpanjang."""
+    def format_report_layout(worksheet):
+        """Layout unduhan: tinggi baris 18, lebar sesuai isi, tanpa wrap."""
         worksheet.freeze_panes = 'A2'
         worksheet.auto_filter.ref = worksheet.dimensions
+        worksheet.sheet_format.defaultRowHeight = 18
         for col in worksheet.columns:
-            max_length = 0
             column_letter = col[0].column_letter
             for cell in col:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(60, max(10, max_length + 2))
-            worksheet.column_dimensions[column_letter].width = adjusted_width
-            for cell in col:
-                if cell.row == 1:
-                    cell.alignment = Alignment(vertical='center', wrap_text=True)
-                    worksheet.row_dimensions[1].height = 32
-                elif isinstance(cell.value, str) and ('\n' in cell.value or len(cell.value) > adjusted_width - 2):
-                    cell.alignment = Alignment(vertical='top', wrap_text=True)
-                    lines = sum(max(1, (len(line) + int(adjusted_width) - 3) // (int(adjusted_width) - 2))
-                                for line in cell.value.split('\n'))
-                    dimension = worksheet.row_dimensions[cell.row]
-                    dimension.height = max(dimension.height or 15, lines * 16)
+                if cell.data_type == 's' and isinstance(cell.value, str):
+                    cell.value = ' '.join(cell.value.splitlines())
+                cell.alignment = Alignment(vertical='center', wrap_text=False)
+            longest = max((len(str(cell.value)) for cell in col if cell.value is not None), default=0)
+            worksheet.column_dimensions[column_letter].width = min(255, max(10, longest + 2))
+        for row in range(1, worksheet.max_row + 1):
+            worksheet.row_dimensions[row].height = 18
     
     # Siapkan data untuk sheet Kasda dan Denda
     df_kasda = df_final.copy()
@@ -1358,6 +1355,15 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
     temp_dir = output_dir or os.path.join(tempfile.gettempdir(), "rusun_app", "output")
     os.makedirs(temp_dir, exist_ok=True)
     export_filename = os.path.join(temp_dir, f"Status_Input_Excel_{timestamp}.xlsx")
+
+    # Kolom teknis tetap dipakai saat mencocokkan/input master; hapus hanya
+    # pada salinan unduhan setelah status per transaksi selesai ditentukan.
+    df_export_status = df_export_status.drop(columns=REPORT_EXCLUDED_COLUMNS, errors='ignore')
+    df_non_rusun_export = pd.DataFrame()
+    df_kasda_audit_export = (
+        df_kasda_audit.drop(columns=REPORT_EXCLUDED_COLUMNS, errors='ignore')
+        if df_kasda_audit is not None else None
+    )
     
     with pd.ExcelWriter(export_filename, engine='openpyxl') as writer:
         # Sheet 1: Data status input
@@ -1370,7 +1376,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
         df_non_rusun_final = pd.concat([df_non_rusun, df_tidak_ditemukan], ignore_index=True)
         
         if len(df_non_rusun_final) > 0:
-            df_non_rusun_export = df_non_rusun_final.copy()
+            df_non_rusun_export = df_non_rusun_final.drop(columns=REPORT_EXCLUDED_COLUMNS, errors='ignore')
             for col in money_columns_status:
                 if col in df_non_rusun_export.columns:
                     # FIX: Gunakan pd.to_numeric untuk konsistensi
@@ -1383,8 +1389,8 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
         # Sheet 4: Data Denda
         if len(df_denda_export) > 0:
             df_denda_export.to_excel(writer, sheet_name='Denda', index=False)
-        if df_kasda_audit is not None:
-            df_kasda_audit.to_excel(writer, sheet_name='Pencocokan Kasda', index=False)
+        if df_kasda_audit_export is not None:
+            df_kasda_audit_export.to_excel(writer, sheet_name='Pencocokan Kasda', index=False)
         
         # Format Excel dengan numeric format
         workbook = writer.book
@@ -1408,12 +1414,12 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
         # 4. Mapping sheet ke dataframe
         sheets_to_write = {
             'Status_Input': df_export_status,
-            'Cek Manual': df_non_rusun_final,
+            'Cek Manual': df_non_rusun_export,
             'Kasda': df_kasda_export,
             'Denda': df_denda_export if len(df_denda_export) > 0 else pd.DataFrame()
         }
-        if df_kasda_audit is not None:
-            sheets_to_write['Pencocokan Kasda'] = df_kasda_audit
+        if df_kasda_audit_export is not None:
+            sheets_to_write['Pencocokan Kasda'] = df_kasda_audit_export
             money_cols['Pencocokan Kasda'] = ['Jumlah_Kasda', 'Denda_Kasda']
         
         # Loop melalui setiap sheet untuk menerapkan format
@@ -1463,8 +1469,8 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
                                 cell.number_format = month_year_format
                 # --- AKHIR PERUBAHAN ---
 
-                # Terapkan penyesuaian lebar kolom otomatis
-                auto_adjust_column_width(worksheet)
+        for sheet_name in workbook.sheetnames:
+            format_report_layout(workbook[sheet_name])
     
     return export_filename
 
