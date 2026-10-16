@@ -1687,7 +1687,7 @@ def main():
                 key="kasda_sewa_file",
                 help="Upload Kasda Inawa dengan sheet per tanggal atau format lama sheet Sewa. Sheet dipilih sesuai tanggal rekening koran, lalu dicocokkan melalui referensi atau urutan waktu bayar dan nominal.",
             )
-            st.caption("Kasda Sewa melengkapi transaksi QRIS/VA. Workbook bulanan tetap urut tanggal; hanya sheet sesuai tanggal rekening koran yang diproses.")
+            st.caption("Unduh Kasda harian dari Inawa untuk tanggal rekening koran yang sama. File satu sheet langsung dapat diproses; tanggal lain tidak ikut dihitung.")
         
         with col2:
             st.markdown("#### 📊 Master Excel")

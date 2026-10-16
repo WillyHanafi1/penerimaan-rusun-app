@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -52,6 +53,31 @@ class KasdaMatchingTests(unittest.TestCase):
                 sheet.append(['TOTAL', None, None, None, None, None, None, None, None, None, None, 400000])
         workbook.create_sheet('Denda').append(['Do not read this sheet'])
         return workbook
+
+    def test_single_day_inawa_export_needs_no_earlier_sheets(self):
+        workbook = self.daily_workbook(names=('14-10-2026',))
+        workbook.remove(workbook['Denda'])
+        self.assertEqual(workbook.sheetnames, ['14-10-2026'])
+        payload = BytesIO()
+        workbook.save(payload)
+        payload.seek(0)
+        bank = pd.DataFrame([bank_row('678901', **{'Posting Date': '14 Oct 2026'})])
+        detected, manual, audit = app.process_bank_sources(bank, payload)
+        self.assertTrue(manual.empty)
+        self.assertEqual(len(detected), 1)
+        self.assertEqual(detected.iloc[0]['Kode_8_Digit'], '02040524')
+        self.assertEqual(detected.iloc[0]['Tahun'], '2025')
+        self.assertEqual(detected.iloc[0]['Bulan'], 'Desember')
+        self.assertEqual(detected.iloc[0]['Credit Transaction'], 400000)
+        self.assertEqual(audit.iloc[0]['Sheet_Kasda'], '14-10-2026')
+        self.assertEqual(audit.iloc[0]['Status_Pencocokan'], 'Cocok')
+
+    def test_single_day_inawa_export_rejects_other_bank_date(self):
+        workbook = self.daily_workbook(names=('14-10-2026',))
+        with patch('kasda_matching.openpyxl.load_workbook', return_value=workbook):
+            with self.assertRaisesRegex(ValueError, '15-10-2026.*tidak tersedia'):
+                app.process_bank_sources(pd.DataFrame([
+                    bank_row(**{'Posting Date': '15 Oct 2026'})]), 'kasda-sewa-2026-10-14.xlsx')
 
     def test_daily_sheet_is_selected_by_bank_date_regardless_of_position(self):
         for names in (('13-10-2026', '14-10-2026', '15-10-2026'),
