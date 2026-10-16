@@ -7,6 +7,14 @@ Aplikasi web untuk memproses data penerimaan rusun dari PDF Bank Statement dan m
 Di bawah upload PDF terdapat upload **Kasda Sewa**, misalnya file `rekap-pendapatan-2026-09-04 (2).xlsx`.
 Pilih tahun master yang akan diproses, unggah master pada slot tahunnya, lalu jalankan proses otomatis.
 
+- Tanpa Kasda, nomor VA rusun dan narasi yang menyebut hunian/periode secara jelas tetap dapat dideteksi. Kode hunian tidak diambil dari potongan nomor rekening panjang, nama pengirim, atau nominal yang kebetulan sama. QRIS tanpa identitas hunian tetap memerlukan Kasda.
+- Narasi pemindahbukuan jaminan seperti `PBY SEWA ... HUNIAN ... RSN ...` dibaca berdasarkan lokasi dan periode tertulis. Pembayaran beberapa bulan menampilkan identitasnya di `Cek Manual`; nominalnya tidak dibagi rata atau dimasukkan seluruhnya ke satu bulan.
+- Pembayaran tunai/pemindahbukuan hanya ditautkan ke Kasda manual jika hunian, periode, tanggal, dan nominal sama persis serta pasangannya tunggal. Kasda manual tidak memakai pencocokan urutan waktu.
+- Lokasi hunian tetap ditampilkan untuk pembayaran yang belum dapat diinput. Nama dan tarif untuk input mengikuti master yang diunggah; nama pada preview bank tidak mengganti nama master.
+- Nama penghuni yang kosong tidak menghalangi pencatatan pembayaran. Nama tetap kosong sampai petugas mengisinya berdasarkan kontrak; aplikasi tidak mengisi nama master dari narasi bank atau Kasda.
+- Jika tarif master juga kosong, pembayaran tetap dicatat memakai rincian sewa, parkir, dan denda Kasda yang cocok persis lewat referensi, atau hunian/periode untuk pembayaran manual. Jumlah seluruh komponen, termasuk biaya lain, harus sama dengan kredit bank. Nilai sewa Kasda hanya tampil pada laporan; nama, tanggal kontrak, dan tarif di master tetap kosong untuk dilengkapi petugas. Pasangan berdasarkan urutan waktu saja atau rincian yang belum lengkap tetap masuk `Cek Manual`.
+- Pembayaran di bawah jumlah tarif master, termasuk pembayaran sebagian atau denda/parkir saja, masuk `Cek Manual` agar tidak menandai sewa bulanan sebagai lunas. Nama/tarif bulan yang kosong pada master tidak diisi dari bulan lain secara otomatis.
+
 - Aplikasi mendukung ekspor Inawa terbaru dari `/admin/reports`: satu workbook dengan sheet per tanggal, misalnya `1-10-2026` sampai `14-10-2026`. Urutan sheet tetap kronologis. Aplikasi memilih **sheet sesuai tanggal rekening koran**, bukan sheet pertama/terakhir; tanggal lain tidak ikut diproses. Rekening koran beberapa hari dapat memilih beberapa sheet sekaligus. Sheet yang tidak tersedia atau header rusak menghasilkan pesan jelas, sedangkan sheet kosong yang valid tetap dapat diproses.
 - Format lama dengan sheet `Sewa` tetap didukung. Judul kelompok rusun menentukan lokasi. Baris subtotal dan sheet `Denda` tidak dihitung lagi sebagai transaksi.
 - Pada template harian Inawa, header gabungan `NOMOR HUNIAN` memetakan gedung/lantai/unit dari tiga kolom detail. `KANAL BAYAR` dibaca sebagai metode bayar dan `WAKTU BAYAR (WIB)` sebagai waktu pembayaran. Referensi lengkap, nomor SKRD/STRD, biaya lain, sheet sumber, dan baris sumber dibawa ke audit pencocokan.
@@ -21,7 +29,7 @@ Pilih tahun master yang akan diproses, unggah master pada slot tahunnya, lalu ja
 - Transaksi yang cocok masuk `Status_Input` dan mengikuti aturan input master yang sama. Sel tujuan yang sudah terisi tetap berstatus `Skip - Sudah Terisi`.
 - Pada baris baru yang diinput ke Master 2025/2026, kolom `KETERANGAN` otomatis diisi `QRIS` atau `VA`. Pewarnaan pelunasan disesuaikan: `#C5D9F1` (biru muda) untuk QRIS dan `#D9B5CA` (ungu muda) untuk VA.
 - Sheet tambahan `Pencocokan Kasda` mencatat semua penerimaan Kasda, nominal, status pencocokan, serta alasan bila belum cocok. Kolom teknis pencocokan dipakai di dalam proses dan tidak ditampilkan pada unduhan laporan.
-- Nama penghuni, tarif, dan perhitungan denda tetap mengikuti master sesuai periode. `Denda_Kasda` disertakan sebagai pembanding.
+- Nama penghuni dan tarif mengikuti master sesuai periode. Denda dihitung dari selisih pembayaran dan tarif master; khusus tarif kosong dengan rincian Kasda terverifikasi, laporan memakai sewa/parkir dan denda Kasda tanpa mengubah tarif master. `Denda_Kasda` disertakan sebagai pembanding.
 - Kedua master yang diunggah tetap tersedia untuk diunduh, termasuk tahun tanpa penerimaan baru. Master tanpa perubahan disalin identik. Hasil rumus tarif tetap seperti `=280000+90000` dipertahankan ketika master disimpan agar masih terbaca saat digunakan lagi untuk proses harian; rumus total tetap dihitung ulang oleh Excel. Proses ulang pada master hasil melewati sel yang sudah terisi.
 
 Untuk memproses file lokal tanpa browser, gunakan `python scripts/process_files.py --help`.

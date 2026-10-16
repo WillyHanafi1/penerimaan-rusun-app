@@ -39,7 +39,7 @@ class KasdaMatchingTests(unittest.TestCase):
             sheet = workbook.create_sheet(name)
             sheet.append(['RUSUNAWA CIBEUREUM TYPE 24'])
             sheet.append(['NO. URUT', 'Tanggal Setor', 'Tanggal Kasda', 'NOMOR HUNIAN', None, None,
-                          'NAMA PENGHUNI', 'TANGGAL PERJANJIAN', 'SEWA HUNIAN', 'PARKIR', 'DENDA',
+                          'NAMA PENGHUNI', 'TANGGAL PERJANJIAN', 'SEWA HUNIAN', 'SEWA LANTAI DASAR (PARKIR)', 'DENDA',
                           'JUMLAH', 'BULAN', 'KANAL BAYAR', 'WAKTU BAYAR (WIB)', 'NO. REFERENSI',
                           'NOMOR SKRD / STRD', 'BIAYA LAIN'])
             sheet.merge_cells('D2:F2')
@@ -67,6 +67,8 @@ class KasdaMatchingTests(unittest.TestCase):
             self.assertEqual(row['Waktu_Bayar_Kasda'], '08:30:00')
             self.assertEqual(row['No_Referensi_Kasda'], '1295012345678901')
             self.assertEqual(row['Biaya_Lain_Kasda'], 5000)
+            self.assertEqual(row['Sewa_Hunian_Kasda'], 350000)
+            self.assertEqual(row['Sewa_Lahan_Kasda'], 30000)
             self.assertEqual(row['Nomor_Dokumen_Kasda'], 'SKRD/1')
 
     def test_daily_matching_uses_payment_date_and_retains_separate_kasda_date(self):
@@ -79,6 +81,8 @@ class KasdaMatchingTests(unittest.TestCase):
         self.assertTrue(manual.empty)
         self.assertEqual(detected.iloc[0]['Tanggal_Kasda'], pd.Timestamp('2026-10-15'))
         self.assertEqual(detected.iloc[0]['Tanggal_Bayar_Kasda'], pd.Timestamp('2026-10-14'))
+        self.assertEqual(detected.iloc[0]['Sewa_Hunian_Kasda'], 350000)
+        self.assertEqual(detected.iloc[0]['Sewa_Lahan_Kasda'], 30000)
         self.assertEqual(audit.iloc[0]['Sheet_Kasda'], '14-10-2026')
 
     def test_daily_multiple_bank_dates_select_only_the_requested_sheets(self):

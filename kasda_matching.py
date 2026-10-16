@@ -114,6 +114,7 @@ def _kasda_headers(values):
     aliases = {
         'METODEBAYAR': ('KANALBAYAR',),
         'WAKTUBAYAR': ('WAKTUBAYARWIB',),
+        'PARKIR': ('SEWALANTAIDASARPARKIR', 'SEWALAHANLANTAI1', 'SEWALAHAN'),
         'GD': ('GEDUNG',), 'LT': ('LANTAI',), 'UNIT': ('NOHUNIAN',),
     }
     for name, alternatives in aliases.items():
@@ -202,7 +203,7 @@ def read_kasda_sewa(path, transaction_dates=None):
                     issues.append('Tanggal pembayaran tidak valid')
                 if amount is None or amount <= 0:
                     issues.append('Jumlah penerimaan tidak valid')
-                if method not in ('QRIS', 'VA'):
+                if method not in ('QRIS', 'VA', 'MANUAL', 'TUNAI'):
                     issues.append('Metode bayar belum didukung untuk pencocokan')
                 records.append({
                     'Sheet_Kasda': sheet_name, 'Baris_Kasda': row_number, 'Rusun_Kasda': rusun,
@@ -212,6 +213,8 @@ def read_kasda_sewa(path, transaction_dates=None):
                     'Metode_Bayar_Kasda': method, 'No_Referensi_Kasda': _text(value('NOREFERENSI')),
                     'Nama_Kasda': _text(value('NAMAPENGHUNI')),
                     'Jumlah_Kasda': amount, 'Denda_Kasda': _money(value('DENDA')),
+                    'Sewa_Hunian_Kasda': _money(value('SEWAHUNIAN')),
+                    'Sewa_Lahan_Kasda': _money(value('PARKIR')),
                     'Biaya_Lain_Kasda': _money(value('BIAYALAIN')),
                     'Nomor_Dokumen_Kasda': _text(value('NOMORSKRDSTRD')),
                     'Keterangan_Pencocokan': ' | '.join(issues),
@@ -284,6 +287,11 @@ def reconcile_kasda_sewa(detected, manual, kasda):
         # Sebagian bank menampilkan pembayaran VA sebagai TRF DARI BCA/SEABANK,
         # tanpa label PAY VA. Nomor VA 16 digit tetap mengidentifikasi transaksi.
         method = 'QRIS' if qris_payment else ('VA' if 'PAYVA' in compact or va_reference else '')
+        if (not method and row['ID_Transaksi'] in detected_ids
+                and _text(row.get('Metode_Bayar')) in ('TUNAI', 'PEMINDAHBUKUAN')
+                and not _text(row.get('_identity_issue'))
+                and all(_text(row.get(c)) for c in ('Kode_8_Digit', 'Bulan', 'Tahun'))):
+            method = 'MANUAL'
         credit, debit = _money(row.get('Credit Transaction')), _money(row.get('Debit Transaction'))
         date = _date(row.get('Posting Date'))
         if not method or credit is None or credit <= 0 or (debit is not None and debit > 0) or pd.isna(date):
@@ -301,6 +309,14 @@ def reconcile_kasda_sewa(detected, manual, kasda):
 
     edges, reference_errors, blocked_receipts = {}, {}, set()
     for b, transaction in candidates.items():
+        if transaction['method'] == 'MANUAL':
+            edges[b] = [k for k, receipt in receipts.items()
+                        if receipt['Metode_Bayar_Kasda'] in ('MANUAL', 'TUNAI')
+                        and receipt.get('Tanggal_Bayar_Kasda', receipt['Tanggal_Kasda']) == transaction['date']
+                        and receipt['Jumlah_Kasda'] == transaction['amount']
+                        and all(_text(receipt[c]) == _text(bank.at[b, c])
+                                for c in ('Kode_8_Digit', 'Bulan', 'Tahun'))]
+            continue
         if not transaction['ref']:
             continue
         edges[b], same_reference = [], []
@@ -317,12 +333,15 @@ def reconcile_kasda_sewa(detected, manual, kasda):
             reference_errors[b] = 'Referensi cocok tetapi nominal bank dan Kasda berbeda'
             blocked_receipts.update(same_reference)
     usage = Counter(k for matches in edges.values() for k in matches)
-    matches = {b: (ks[0], 'Referensi + tanggal + nominal') for b, ks in edges.items()
+    matches = {b: (ks[0], 'Identitas hunian + periode + tanggal + nominal'
+                  if candidates[b]['method'] == 'MANUAL' else 'Referensi + tanggal + nominal') for b, ks in edges.items()
                if len(ks) == 1 and usage[ks[0]] == 1}
 
     for date in sorted({x['date'] for x in candidates.values()}):
-        bank_day = [b for b, row in candidates.items() if row['date'] == date]
-        kasda_day = [k for k, row in receipts.items() if row.get('Tanggal_Bayar_Kasda', row['Tanggal_Kasda']) == date]
+        bank_day = [b for b, row in candidates.items() if row['date'] == date and row['method'] in ('QRIS', 'VA')]
+        kasda_day = [k for k, row in receipts.items()
+                     if row.get('Tanggal_Bayar_Kasda', row['Tanggal_Kasda']) == date
+                     and row['Metode_Bayar_Kasda'] in ('QRIS', 'VA')]
         anchors = [(b, matches[b][0]) for b in bank_day if b in matches]
         if any(not receipts[k]['Waktu_Bayar_Kasda'] for _, k in anchors):
             continue
@@ -351,7 +370,8 @@ def reconcile_kasda_sewa(detected, manual, kasda):
     metadata = ['Baris_Kasda', 'Waktu_Bayar_Kasda', 'No_Referensi_Kasda',
                 'Nama_Kasda', 'Jumlah_Kasda', 'Denda_Kasda', 'Metode_Bayar_Kasda']
     metadata += [name for name in ['Sheet_Kasda', 'Tanggal_Kasda', 'Tanggal_Bayar_Kasda',
-                 'Biaya_Lain_Kasda', 'Nomor_Dokumen_Kasda'] if name in audit]
+                 'Biaya_Lain_Kasda', 'Nomor_Dokumen_Kasda',
+                 'Sewa_Hunian_Kasda', 'Sewa_Lahan_Kasda'] if name in audit]
     for column in metadata + ['Metode_Pencocokan', 'Sumber_Deteksi']:
         if column not in bank:
             bank[column] = pd.Series([None] * len(bank), dtype=object)

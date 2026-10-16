@@ -18,6 +18,7 @@ import os
 import shutil
 from kasda_matching import read_kasda_sewa, reconcile_kasda_sewa
 from master_formula_cache import save_master
+from bank_identity import enrich_bank_identities, add_housing_columns, describe_manual_housing
 
 # Konfigurasi halaman
 st.set_page_config(
@@ -357,6 +358,7 @@ def process_setortunai(df_bank):
     # Rename agar kode di bawah bisa tetap pakai 'Narasi'
     if narasi_col != 'Narasi':
         df_bank = df_bank.rename(columns={narasi_col: 'Narasi'})
+        narasi_col = 'Narasi'
     
     # Pisahkan data berdasarkan kata SETOR TUNAI (handle variasi spasi)
     df_bank['Narasi_Clean'] = df_bank[narasi_col].astype(str).str.upper().str.replace(' ', '', regex=False)
@@ -505,10 +507,12 @@ def process_bank_sources(df_bank, kasda_path=None):
     """Gabungkan deteksi narasi dan Kasda tanpa menggandakan transaksi bank."""
     detected, manual = process_setortunai(df_bank)
     detected['Sumber_Deteksi'] = 'Narasi SETORTUNAI'
+    detected, manual = enrich_bank_identities(detected, manual)
     if kasda_path is None:
         return detected, manual, None
     kasda = read_kasda_sewa(kasda_path, transaction_dates=df_bank['Posting Date'])
-    return reconcile_kasda_sewa(detected, manual, kasda)
+    detected, manual, audit = reconcile_kasda_sewa(detected, manual, kasda)
+    return add_housing_columns(detected), add_housing_columns(manual), audit
 
 def filter_incomplete_data(df_setortunai, df_non_rusun, supported_years=None):
     """Filter data yang tidak lengkap dan tahun yang tidak didukung"""
@@ -539,7 +543,8 @@ def filter_incomplete_data(df_setortunai, df_non_rusun, supported_years=None):
     high_credit_mask = df_setortunai['Credit Transaction'].apply(to_numeric_safe) > 700000
     
     # Gabungkan ketiga filter: data tidak lengkap ATAU tahun tidak didukung ATAU credit transaction > 700.000
-    to_move_mask = incomplete_mask | unsupported_year_mask | high_credit_mask
+    identity_issue = df_setortunai.get('_identity_issue', pd.Series('', index=df_setortunai.index)).fillna('').ne('')
+    to_move_mask = incomplete_mask | unsupported_year_mask | high_credit_mask | identity_issue
     
     # Pindahkan data tidak lengkap dan tahun tidak didukung ke non-rusun
     df_setortunai_to_move = df_setortunai[to_move_mask].copy()
@@ -547,6 +552,8 @@ def filter_incomplete_data(df_setortunai, df_non_rusun, supported_years=None):
     
     # Tambahkan keterangan untuk data yang dipindah
     def create_keterangan(row):
+        if pd.notna(row.get('_identity_issue')) and row.get('_identity_issue'):
+            return row['_identity_issue']
         missing_fields = []
         reasons = []
         
@@ -611,6 +618,8 @@ def extract_from_master_excel(df_setortunai, master_files):
     ]
     
     extract_cols = ['Nama Penghuni', 'Tanggal Perjanjian Sewa', 'Sewa Hunian', 'Sewa Lahan Lantai 1']
+    # Bank/manual previews may already contain a name; the uploaded master owns these fields.
+    df_setortunai = df_setortunai.drop(columns=extract_cols, errors='ignore').copy()
     
     def get_month_columns_extract(bulan):
         """Mengembalikan kolom berdasarkan bulan"""
@@ -793,26 +802,60 @@ def extract_from_master_excel(df_setortunai, master_files):
     return df_with_extract
 
 def filter_unmatched_master(df_with_extract, df_manual):
-    """Keep failed master lookups out of status, denda and master input entirely."""
+    """Use verified Kasda fees for blank tariffs without filling master identity/rates."""
+    df_with_extract = df_with_extract.copy()
     columns = ['Nama Penghuni', 'Tanggal Perjanjian Sewa', 'Sewa Hunian', 'Sewa Lahan Lantai 1']
     missing = df_with_extract[columns].isna().all(axis=1)
     missing_tariff = (
         df_with_extract['Sewa Hunian'].apply(to_numeric_safe)
         + df_with_extract['Sewa Lahan Lantai 1'].apply(to_numeric_safe)
     ) <= 0
-    rejected_mask = missing | missing_tariff
+    # Fee substitutes are report values only; input_to_excel_master writes payment
+    # cells, never these rent/name/contract cells in the original master.
+    def verified_kasda_fees(row):
+        if row.get('Metode_Pencocokan') not in (
+            'Referensi + tanggal + nominal',
+            'Identitas hunian + periode + tanggal + nominal',
+        ):
+            return False
+        components = pd.to_numeric(pd.Series([
+            row.get('Sewa_Hunian_Kasda'), row.get('Sewa_Lahan_Kasda'),
+            row.get('Denda_Kasda'), row.get('Biaya_Lain_Kasda'),
+            row.get('Jumlah_Kasda'), row.get('Credit Transaction'),
+        ]), errors='coerce')
+        return (components.notna().all() and (components >= 0).all()
+                and components.iloc[0] > 0
+                and abs(components.iloc[:4].sum() - components.iloc[4]) < 0.005
+                and abs(components.iloc[4] - components.iloc[5]) < 0.005)
+
+    df_with_extract['_tariff_from_kasda'] = False
+    for column in ('Sewa Hunian', 'Sewa Lahan Lantai 1'):
+        df_with_extract[column] = df_with_extract[column].astype(object)
+    for index in df_with_extract.index[missing_tariff & ~missing]:
+        if verified_kasda_fees(df_with_extract.loc[index]):
+            df_with_extract.at[index, 'Sewa Hunian'] = df_with_extract.at[index, 'Sewa_Hunian_Kasda']
+            df_with_extract.at[index, 'Sewa Lahan Lantai 1'] = df_with_extract.at[index, 'Sewa_Lahan_Kasda']
+            df_with_extract.at[index, '_tariff_from_kasda'] = True
+    missing_tariff &= ~df_with_extract['_tariff_from_kasda']
+    tariff = (df_with_extract['Sewa Hunian'].apply(to_numeric_safe)
+              + df_with_extract['Sewa Lahan Lantai 1'].apply(to_numeric_safe))
+    underpayment = (df_with_extract['Credit Transaction'].apply(to_numeric_safe) + 0.005 < tariff
+                    if 'Credit Transaction' in df_with_extract else pd.Series(False, index=df_with_extract.index))
+    rejected_mask = missing | missing_tariff | underpayment
     rejected = df_with_extract[rejected_mask].copy()
     if not rejected.empty:
         rejected['Jenis_Baris'] = 'Transaksi bank'
         rejected['Keterangan'] = rejected.apply(
-            lambda row: ("Tarif sewa master kosong/nol; perlu dilengkapi sebelum input: "
+            lambda row: ("Tarif sewa master kosong/nol dan rincian Kasda belum cocok persis: "
                          if missing_tariff.loc[row.name] and not missing.loc[row.name]
+                         else "Pembayaran sebagian/denda saja di bawah tarif master; tidak boleh menandai lunas: "
+                         if underpayment.loc[row.name] and not missing.loc[row.name]
                          else "Data master tidak ditemukan/tidak dapat dibaca: ") + f"tahun {row['Tahun']}, "
                         f"kode {row['Kode_8_Digit']}, bulan {row['Bulan']}", axis=1)
         df_manual = pd.concat([df_manual, rejected], ignore_index=True)
     if 'Urutan_Rekening_Koran' in df_manual:
         df_manual = df_manual.sort_values('Urutan_Rekening_Koran', kind='stable')
-    return df_with_extract[~rejected_mask].reset_index(drop=True), df_manual.reset_index(drop=True)
+    return df_with_extract[~rejected_mask].reset_index(drop=True), describe_manual_housing(df_manual).reset_index(drop=True)
 
 def calculate_denda(df_with_extract):
     """Kalkulasi denda berdasarkan selisih Credit Transaction dengan total sewa"""
@@ -849,6 +892,8 @@ def calculate_denda(df_with_extract):
     
     def calculate_denda_amount(row):
         try:
+            if row.get('_tariff_from_kasda', False) == True:
+                return float(row['Denda_Kasda'])
             # Ambil nilai Credit Transaction dari bank statement
             credit_transaction = to_numeric_safe(row.get('Credit Transaction', 0))
             
@@ -896,7 +941,7 @@ def determine_payment_method(row):
     if kasda_method in ('QRIS', 'VA'):
         return kasda_method
     direct_method = str(row.get('Metode_Bayar') or '').strip().upper()
-    if direct_method in ('QRIS', 'VA'):
+    if direct_method in ('QRIS', 'VA', 'TUNAI', 'PEMINDAHBUKUAN'):
         return direct_method
     narasi = str(row.get('Narasi') or '').upper()
     compact = re.sub(r'\s+', '', narasi)
@@ -1177,6 +1222,8 @@ REPORT_EXCLUDED_COLUMNS = frozenset({
     'Tanggal_Kasda', 'Tanggal_Bayar_Kasda', 'Biaya_Lain_Kasda',
     'Nomor_Dokumen_Kasda', 'Metode_Pencocokan',
     'Jumlah_Kasda', 'Sumber_Deteksi', 'Baris_Kasda',
+    '_identity_issue', '_bank_name', 'Metode_Bayar', '_tariff_from_kasda',
+    'Sewa_Hunian_Kasda', 'Sewa_Lahan_Kasda',
 })
 
 REPORT_STATUS_COLUMNS = (
@@ -1235,6 +1282,10 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
         mask = status_mask(failed_detail)
         df_export_status.loc[mask, 'Status_Input'] = 'Gagal'
         df_export_status.loc[mask, 'Keterangan_Input'] = failed_detail['Reason']
+
+    kasda_tariff = df_export_status.get('_tariff_from_kasda', pd.Series(False, index=df_export_status.index)).eq(True)
+    df_export_status.loc[kasda_tariff, 'Keterangan_Input'] += (
+        '; rincian sewa/denda memakai Kasda; nama, tanggal kontrak, dan tarif master tetap seperti semula')
     
     # Fungsi format
     def format_date_ddmmmyy(date_str):

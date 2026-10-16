@@ -13,6 +13,102 @@ from master_formula_cache import NS, save_master
 
 
 class MasterOutputTests(unittest.TestCase):
+    def test_verified_kasda_fees_allow_payment_but_master_identity_and_rates_stay_blank(self):
+        for method in ('Referensi + tanggal + nominal',
+                       'Identitas hunian + periode + tanggal + nominal'):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                source = root / 'master.xlsx'
+                workbook = openpyxl.Workbook()
+                sheet = workbook.active
+                sheet.title = 'CIGUGUR'
+                for column in ('B', 'C', 'D'):
+                    sheet[f'{column}3'] = '01'
+                workbook.save(source)
+                data = pd.DataFrame([dict(ID_Transaksi='BANK-1', Kode_8_Digit='01010101',
+                    Bulan='Oktober', Tahun='2026', Nama_Kasda='Nama dari Kasda',
+                    Sewa_Hunian_Kasda=300000, Sewa_Lahan_Kasda=20000,
+                    Denda_Kasda=10000.25, Biaya_Lain_Kasda=5000,
+                    Jumlah_Kasda=335000.25, Metode_Pencocokan=method,
+                    Metode_Bayar_Kasda='QRIS',
+                    **{'Posting Date': '14 Oct 2026', 'Credit Transaction': 335000.25})])
+                extracted = app.extract_from_master_excel(data, {'2026': str(source)})
+                eligible, manual = app.filter_unmatched_master(extracted, data.head(0))
+                self.assertTrue(manual.empty)
+                final = app.calculate_denda(eligible)
+                row = final.iloc[0]
+                self.assertEqual(row['Nama Penghuni'], '')
+                self.assertEqual(row['Tanggal Perjanjian Sewa'], '')
+                self.assertEqual(row['Sewa Hunian'], 300000)
+                self.assertEqual(row['Sewa Lahan Lantai 1'], 20000)
+                self.assertEqual(row['Denda'], 10000.25)  # Other fees are not penalties.
+                valid, results = app.input_to_excel_master(final, {'2026': str(source)}, str(root / 'output'))
+                self.assertEqual(results['success'], 1)
+                updated = openpyxl.load_workbook(results['backup_files']['2026'])['CIGUGUR']
+                for column in ('CU', 'CV', 'CW', 'CX'):
+                    self.assertIsNone(updated[f'{column}3'].value)
+                self.assertEqual(updated['CY3'].value, 10000.25)
+                self.assertEqual(updated['DA3'].value, 'QRIS')
+                self.assertIsNotNone(updated['DB3'].value)
+                report = app.create_export_excel(results, valid, final, manual, output_dir=str(root / 'report'))
+                status = openpyxl.load_workbook(report)['Status_Input']
+                headers = {cell.value: cell.column for cell in status[1]}
+                self.assertIsNone(status.cell(2, headers['Nama Penghuni']).value)
+                self.assertEqual(status.cell(2, headers['Sewa Hunian']).value, 300000)
+                self.assertIn('memakai Kasda', status.cell(2, headers['Keterangan_Input']).value)
+
+    def test_blank_tariff_fallback_rejects_incomplete_untrusted_or_unbalanced_kasda(self):
+        base = dict(Kode_8_Digit='01010101', Bulan='Oktober', Tahun='2026',
+            Nama_Kasda='Nama pada Kasda',
+            Sewa_Hunian_Kasda=300000, Sewa_Lahan_Kasda=0, Denda_Kasda=10000,
+            Biaya_Lain_Kasda=0, Jumlah_Kasda=310000,
+            Metode_Pencocokan='Referensi + tanggal + nominal',
+            **{'Nama Penghuni': '', 'Tanggal Perjanjian Sewa': '',
+               'Sewa Hunian': '', 'Sewa Lahan Lantai 1': '', 'Credit Transaction': 310000})
+        invalid = [
+            {'Metode_Pencocokan': 'Urutan waktu + tanggal + nominal'},
+            {'Metode_Pencocokan': None}, {'Denda_Kasda': None},
+            {'Biaya_Lain_Kasda': 5000}, {'Jumlah_Kasda': 300000},
+            {'Credit Transaction': 300000}, {'Sewa_Hunian_Kasda': 0, 'Denda_Kasda': 310000},
+            {'Sewa_Lahan_Kasda': -1, 'Denda_Kasda': 10001},
+            dict.fromkeys(('Nama Penghuni', 'Tanggal Perjanjian Sewa',
+                           'Sewa Hunian', 'Sewa Lahan Lantai 1'), None),
+        ]
+        for changes in invalid:
+            with self.subTest(changes=changes):
+                data = pd.DataFrame([{**base, **changes}])
+                eligible, manual = app.filter_unmatched_master(data, data.head(0))
+                self.assertTrue(eligible.empty)
+                self.assertEqual(len(manual), 1)
+                self.assertFalse(manual.iloc[0]['Nama Penghuni'])
+
+    def test_blank_tenant_name_does_not_block_payment_or_get_filled_from_bank(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'master.xlsx'
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = 'CIGUGUR'
+            for column in ('B', 'C', 'D'):
+                sheet[f'{column}3'] = '01'
+            sheet['CW3'] = 300000
+            workbook.save(source)
+            data = pd.DataFrame([dict(ID_Transaksi='BANK-1', Kode_8_Digit='01010101',
+                Bulan='Oktober', Tahun='2026', Nama_Kasda='Nama pada Kasda',
+                **{'Posting Date': '14 Oct 2026', 'Credit Transaction': 310000})])
+            extracted = app.extract_from_master_excel(data, {'2026': str(source)})
+            eligible, manual = app.filter_unmatched_master(extracted, data.head(0))
+            self.assertTrue(manual.empty)
+            self.assertEqual(eligible.iloc[0]['Nama Penghuni'], '')
+            _, results = app.input_to_excel_master(app.calculate_denda(eligible),
+                {'2026': str(source)}, str(root / 'output'))
+            self.assertEqual(results['success'], 1)
+            updated = openpyxl.load_workbook(results['backup_files']['2026'])['CIGUGUR']
+            self.assertIsNone(updated['CU3'].value)
+            self.assertEqual(updated['CW3'].value, 300000)
+            self.assertEqual(updated['CY3'].value, 10000)
+            self.assertIsNotNone(updated['DB3'].value)
+
     def test_download_omits_technical_columns_after_matching_status_and_keeps_amounts(self):
         hidden = {
             'Urutan_Rekening_Koran', 'ID_Transaksi', 'Narasi_Clean', 'Has_SETORTUNAI',
@@ -20,6 +116,7 @@ class MasterOutputTests(unittest.TestCase):
             'Tanggal_Kasda', 'Tanggal_Bayar_Kasda', 'Biaya_Lain_Kasda',
             'Nomor_Dokumen_Kasda', 'Metode_Pencocokan',
             'Jumlah_Kasda', 'Sumber_Deteksi', 'Baris_Kasda',
+            'Sewa_Hunian_Kasda', 'Sewa_Lahan_Kasda', '_tariff_from_kasda',
         }
         rows = []
         for index in (1, 2):
