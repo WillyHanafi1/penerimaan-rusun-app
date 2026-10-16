@@ -27,6 +27,7 @@ class MasterOutputTests(unittest.TestCase):
                 'ID_Transaksi': f'BANK-{index}', 'Kode_8_Digit': '01010101',
                 'Bulan': 'Oktober', 'Tahun': '2026', 'Posting Date': '14 Oct 2026',
                 'Narasi': 'Baris pertama\nBaris kedua',
+                'Metode_Bayar_Kasda': 'QRIS' if index == 1 else 'VA',
                 'Nama Penghuni': 'Penghuni dengan nama panjang untuk pemeriksaan lebar kolom',
                 'Sewa Hunian': 100000, 'Sewa Lahan Lantai 1': 0,
                 'Tanggal Perjanjian Sewa': '01/01/2026', 'Denda': 5000,
@@ -58,9 +59,10 @@ class MasterOutputTests(unittest.TestCase):
                     'Credit Transaction', 'Balance', 'Kode_8_Digit', 'Rusunawa', 'Gedung',
                     'Lantai', 'No Hunian', 'Nama Penghuni', 'Tanggal Perjanjian Sewa',
                     'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda', 'Bulan', 'Tahun',
-                    'Status_Input', 'Keterangan_Input',
+                    'Kanal Bayar', 'Status_Input', 'Keterangan_Input',
                 ])
                 headers = {cell.value: cell.column for cell in status[1]}
+                self.assertEqual([status.cell(row, headers['Kanal Bayar']).value for row in (2, 3)], ['QRIS', 'VA'])
                 self.assertEqual([status.cell(row, headers['Status_Input']).value for row in (2, 3)],
                                  ['Berhasil Input', 'Skip - Sudah Terisi'])
                 for row in (2, 3):

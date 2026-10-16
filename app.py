@@ -890,6 +890,23 @@ def calculate_denda(df_with_extract):
     
     return df_with_extract
 
+def determine_payment_method(row):
+    """Menentukan metode yang sama untuk input master dan laporan unduhan."""
+    kasda_method = str(row.get('Metode_Bayar_Kasda') or '').strip().upper()
+    if kasda_method in ('QRIS', 'VA'):
+        return kasda_method
+    direct_method = str(row.get('Metode_Bayar') or '').strip().upper()
+    if direct_method in ('QRIS', 'VA'):
+        return direct_method
+    narasi = str(row.get('Narasi') or '').upper()
+    compact = re.sub(r'\s+', '', narasi)
+    if 'PAYMENTQRIS' in compact or 'QRIS' in narasi or 'QRP-' in narasi:
+        return 'QRIS'
+    if 'PAYVA' in compact or 'PAY VA' in narasi:
+        return 'VA'
+    return None
+
+
 def input_to_excel_master(df_final, master_files, output_dir=None):
     """Input data ke Excel Master dengan backup dan pewarnaan (disesuaikan dengan code baru) - OPTIMIZED VERSION"""
     import shutil
@@ -916,22 +933,6 @@ def input_to_excel_master(df_final, master_files, output_dir=None):
             'Desember': {'posting_date_cols': ['DV', 'DW'], 'denda_col': 'DS', 'tambahan_col': 'DX', 'keterangan_col': 'DU', 'color_range': ['DO', 'DP', 'DQ', 'DR', 'DS', 'DT', 'DU', 'DV', 'DW', 'DX']}
         }
         return month_mapping.get(bulan)
-
-    def determine_payment_method(row):
-        """Menentukan metode pembayaran (QRIS, VA, atau lainnya)."""
-        kasda_method = str(row.get('Metode_Bayar_Kasda') or '').strip().upper()
-        if kasda_method in ('QRIS', 'VA'):
-            return kasda_method
-        direct_method = str(row.get('Metode_Bayar') or '').strip().upper()
-        if direct_method in ('QRIS', 'VA'):
-            return direct_method
-        narasi = str(row.get('Narasi') or '').upper()
-        compact = re.sub(r'\s+', '', narasi)
-        if 'PAYMENTQRIS' in compact or 'QRIS' in narasi or 'QRP-' in narasi:
-            return 'QRIS'
-        if 'PAYVA' in compact or 'PAY VA' in narasi:
-            return 'VA'
-        return None
 
     def get_sheet_name(kode_2_digit):
         """Mengembalikan nama sheet berdasarkan 2 digit pertama kode."""
@@ -1183,7 +1184,7 @@ REPORT_STATUS_COLUMNS = (
     'Credit Transaction', 'Balance', 'Kode_8_Digit', 'Rusunawa', 'Gedung',
     'Lantai', 'No Hunian', 'Nama Penghuni', 'Tanggal Perjanjian Sewa',
     'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda', 'Bulan', 'Tahun',
-    'Status_Input', 'Keterangan_Input',
+    'Kanal Bayar', 'Status_Input', 'Keterangan_Input',
 )
 
 
@@ -1369,6 +1370,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
     # pada salinan unduhan setelah status per transaksi selesai ditentukan.
     df_status_details = df_export_status
     df_export_status = df_status_details.reindex(columns=REPORT_STATUS_COLUMNS, fill_value='')
+    df_export_status['Kanal Bayar'] = df_status_details.apply(determine_payment_method, axis=1).fillna('')
     df_non_rusun_export = pd.DataFrame()
     df_kasda_audit_export = (
         df_kasda_audit.drop(columns=REPORT_EXCLUDED_COLUMNS, errors='ignore')

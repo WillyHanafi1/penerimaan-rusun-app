@@ -36,11 +36,12 @@ Data tersebut tetap dipakai di dalam proses pencocokan. Semua baris laporan memi
 tinggi 18, tanpa wrap text, dengan lebar kolom menyesuaikan isi.
 Pemisah baris di narasi unduhan diganti spasi agar seluruh teks tampil dalam satu baris.
 
-Sheet `Status_Input` berisi tepat 21 kolom dengan urutan: `No`, `Posting Date`,
+Sheet `Status_Input` berisi tepat 22 kolom dengan urutan: `No`, `Posting Date`,
 `Effective Date`, `Narasi`, `Debit Transaction`, `Credit Transaction`, `Balance`,
 `Kode_8_Digit`, `Rusunawa`, `Gedung`, `Lantai`, `No Hunian`, `Nama Penghuni`,
 `Tanggal Perjanjian Sewa`, `Sewa Hunian`, `Sewa Lahan Lantai 1`, `Denda`,
-`Bulan`, `Tahun`, `Status_Input`, dan `Keterangan_Input`.
+`Bulan`, `Tahun`, `Kanal Bayar`, `Status_Input`, dan `Keterangan_Input`.
+Kanal bayar memakai penentuan metode yang sama dengan input master, misalnya `QRIS` atau `VA`.
 
 ## 🚀 Fitur Utama
 
