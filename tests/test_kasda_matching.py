@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -31,6 +32,79 @@ def match(bank_rows, receipts):
 
 
 class KasdaMatchingTests(unittest.TestCase):
+    def daily_workbook(self, names=('13-10-2026', '14-10-2026', '15-10-2026'), empty=False):
+        workbook = openpyxl.Workbook()
+        workbook.remove(workbook.active)
+        for name in names:
+            sheet = workbook.create_sheet(name)
+            sheet.append(['RUSUNAWA CIBEUREUM TYPE 24'])
+            sheet.append(['NO. URUT', 'Tanggal Setor', 'Tanggal Kasda', 'NOMOR HUNIAN', None, None,
+                          'NAMA PENGHUNI', 'TANGGAL PERJANJIAN', 'SEWA HUNIAN', 'PARKIR', 'DENDA',
+                          'JUMLAH', 'BULAN', 'KANAL BAYAR', 'WAKTU BAYAR (WIB)', 'NO. REFERENSI',
+                          'NOMOR SKRD / STRD', 'BIAYA LAIN'])
+            sheet.merge_cells('D2:F2')
+            if not empty:
+                day = int(name.split('-')[0])
+                sheet.append([1, datetime(2026, 10, day), datetime(2026, 10, day + 1),
+                              'D', 'V', 24, 'Contoh', datetime(2025, 1, 1), 350000, 30000,
+                              15000, 400000, datetime(2025, 12, 1), 'QRIS',
+                              datetime(2026, 10, day, 8, 30), '1295012345678901', 'SKRD/1', 5000])
+                sheet.append(['TOTAL', None, None, None, None, None, None, None, None, None, None, 400000])
+        workbook.create_sheet('Denda').append(['Do not read this sheet'])
+        return workbook
+
+    def test_daily_sheet_is_selected_by_bank_date_regardless_of_position(self):
+        for names in (('13-10-2026', '14-10-2026', '15-10-2026'),
+                      ('14-10-2026', '15-10-2026', '13-10-2026'),
+                      ('15-10-2026', '13-10-2026', '14-10-2026')):
+            with patch('kasda_matching.openpyxl.load_workbook', return_value=self.daily_workbook(names)):
+                receipts = read_kasda_sewa('daily.xlsx', ['14 Oct 2026'])
+            self.assertEqual(len(receipts), 1)
+            row = receipts.iloc[0]
+            self.assertEqual(row['Sheet_Kasda'], '14-10-2026')
+            self.assertEqual(row['Kode_8_Digit'], '02040524')
+            self.assertEqual((row['Bulan'], row['Tahun']), ('Desember', '2025'))
+            self.assertEqual(row['Waktu_Bayar_Kasda'], '08:30:00')
+            self.assertEqual(row['No_Referensi_Kasda'], '1295012345678901')
+            self.assertEqual(row['Biaya_Lain_Kasda'], 5000)
+            self.assertEqual(row['Nomor_Dokumen_Kasda'], 'SKRD/1')
+
+    def test_daily_matching_uses_payment_date_and_retains_separate_kasda_date(self):
+        with patch('kasda_matching.openpyxl.load_workbook', return_value=self.daily_workbook()):
+            receipts = read_kasda_sewa('daily.xlsx', ['14 Oct 2026'])
+        bank = pd.DataFrame([bank_row('678901', **{'Posting Date': '14 Oct 2026'})])
+        detected, manual = app.process_setortunai(bank)
+        detected, manual, audit = reconcile_kasda_sewa(detected, manual, receipts)
+        self.assertEqual(len(detected), 1)
+        self.assertTrue(manual.empty)
+        self.assertEqual(detected.iloc[0]['Tanggal_Kasda'], pd.Timestamp('2026-10-15'))
+        self.assertEqual(detected.iloc[0]['Tanggal_Bayar_Kasda'], pd.Timestamp('2026-10-14'))
+        self.assertEqual(audit.iloc[0]['Sheet_Kasda'], '14-10-2026')
+
+    def test_daily_multiple_bank_dates_select_only_the_requested_sheets(self):
+        with patch('kasda_matching.openpyxl.load_workbook', return_value=self.daily_workbook()):
+            receipts = read_kasda_sewa('daily.xlsx', ['13 Oct 2026', '15 Oct 2026'])
+        self.assertEqual(receipts['Sheet_Kasda'].tolist(), ['13-10-2026', '15-10-2026'])
+
+    def test_daily_missing_date_or_invalid_header_is_reported_instead_of_using_last_sheet(self):
+        with patch('kasda_matching.openpyxl.load_workbook', return_value=self.daily_workbook()):
+            with self.assertRaisesRegex(ValueError, 'tidak tersedia'):
+                read_kasda_sewa('daily.xlsx', ['12 Oct 2026'])
+        workbook = self.daily_workbook()
+        workbook['14-10-2026']['N2'] = 'Invalid payment header'
+        with patch('kasda_matching.openpyxl.load_workbook', return_value=workbook):
+            with self.assertRaisesRegex(ValueError, 'Header penerimaan'):
+                read_kasda_sewa('daily.xlsx', ['14 Oct 2026'])
+
+    def test_valid_empty_daily_sheet_keeps_bank_transactions_manual(self):
+        with patch('kasda_matching.openpyxl.load_workbook', return_value=self.daily_workbook(empty=True)):
+            receipts = read_kasda_sewa('daily.xlsx', ['14 Oct 2026'])
+        detected, manual = app.process_setortunai(pd.DataFrame([bank_row(**{'Posting Date': '14 Oct 2026'})]))
+        detected, manual, audit = reconcile_kasda_sewa(detected, manual, receipts)
+        self.assertTrue(detected.empty)
+        self.assertEqual(len(manual), 1)
+        self.assertTrue(audit.empty)
+
     def test_reference_uses_amount_and_date_and_retains_bank_values(self):
         detected, manual, audit = match([bank_row()], [receipt()])
         self.assertEqual(len(detected), 1)
@@ -213,7 +287,7 @@ class KasdaMatchingTests(unittest.TestCase):
                              for i, (year, denda) in enumerate([('2025', 5000), ('2026', 15000), ('2026', 25000)])])
         with patch('shutil.copy2'), patch('os.path.exists', return_value=True), \
              patch('openpyxl.load_workbook', side_effect=lambda p: workbooks['2025' if '2025' in p else '2026']), \
-             patch.object(openpyxl.workbook.workbook.Workbook, 'save') as save:
+             patch('app.save_master') as save:
             _, result = app.input_to_excel_master(data, {'2025': 'master_2025.xlsx', '2026': 'master_2026.xlsx'})
         self.assertEqual((result['success'], result['skipped'], result['failed']), (2, 1, 0))
         self.assertEqual(save.call_count, 2)
@@ -242,7 +316,7 @@ class KasdaMatchingTests(unittest.TestCase):
         final = app.calculate_denda(eligible)
         with patch('shutil.copy2'), patch('os.path.exists', return_value=True), \
              patch('openpyxl.load_workbook', return_value=workbook), \
-             patch.object(openpyxl.workbook.workbook.Workbook, 'save'):
+             patch('app.save_master'):
             valid, results = app.input_to_excel_master(final, {'2026': 'master_2026.xlsx'})
         self.assertEqual(results['success'], 1)
         self.assertEqual(results['failed'], 0)

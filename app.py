@@ -11,12 +11,13 @@ import tempfile
 import os
 import openpyxl
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Alignment, PatternFill
 from datetime import datetime
 import tempfile
 import os
 import shutil
 from kasda_matching import read_kasda_sewa, reconcile_kasda_sewa
+from master_formula_cache import save_master
 
 # Konfigurasi halaman
 st.set_page_config(
@@ -506,7 +507,7 @@ def process_bank_sources(df_bank, kasda_path=None):
     detected['Sumber_Deteksi'] = 'Narasi SETORTUNAI'
     if kasda_path is None:
         return detected, manual, None
-    kasda = read_kasda_sewa(kasda_path)
+    kasda = read_kasda_sewa(kasda_path, transaction_dates=df_bank['Posting Date'])
     return reconcile_kasda_sewa(detected, manual, kasda)
 
 def filter_incomplete_data(df_setortunai, df_non_rusun, supported_years=None):
@@ -795,16 +796,23 @@ def filter_unmatched_master(df_with_extract, df_manual):
     """Keep failed master lookups out of status, denda and master input entirely."""
     columns = ['Nama Penghuni', 'Tanggal Perjanjian Sewa', 'Sewa Hunian', 'Sewa Lahan Lantai 1']
     missing = df_with_extract[columns].isna().all(axis=1)
-    rejected = df_with_extract[missing].copy()
+    missing_tariff = (
+        df_with_extract['Sewa Hunian'].apply(to_numeric_safe)
+        + df_with_extract['Sewa Lahan Lantai 1'].apply(to_numeric_safe)
+    ) <= 0
+    rejected_mask = missing | missing_tariff
+    rejected = df_with_extract[rejected_mask].copy()
     if not rejected.empty:
         rejected['Jenis_Baris'] = 'Transaksi bank'
         rejected['Keterangan'] = rejected.apply(
-            lambda row: f"Data master tidak ditemukan/tidak dapat dibaca: tahun {row['Tahun']}, "
+            lambda row: ("Tarif sewa master kosong/nol; perlu dilengkapi sebelum input: "
+                         if missing_tariff.loc[row.name] and not missing.loc[row.name]
+                         else "Data master tidak ditemukan/tidak dapat dibaca: ") + f"tahun {row['Tahun']}, "
                         f"kode {row['Kode_8_Digit']}, bulan {row['Bulan']}", axis=1)
         df_manual = pd.concat([df_manual, rejected], ignore_index=True)
     if 'Urutan_Rekening_Koran' in df_manual:
         df_manual = df_manual.sort_values('Urutan_Rekening_Koran', kind='stable')
-    return df_with_extract[~missing].reset_index(drop=True), df_manual.reset_index(drop=True)
+    return df_with_extract[~rejected_mask].reset_index(drop=True), df_manual.reset_index(drop=True)
 
 def calculate_denda(df_with_extract):
     """Kalkulasi denda berdasarkan selisih Credit Transaction dengan total sewa"""
@@ -1128,7 +1136,7 @@ def input_to_excel_master(df_final, master_files, output_dir=None):
                         ws.column_dimensions['D'].hidden = True
                 
                 # OPTIMIZATION: Save workbook ONCE after all changes are done
-                workbook.save(backup_path)
+                save_master(workbook, backup_path)
                 workbook.close()
                 
             except Exception as e:
@@ -1154,6 +1162,11 @@ def input_to_excel_master(df_final, master_files, output_dir=None):
     else:
         results = {'success': 0, 'skipped': 0, 'failed': 0, 'errors': ['Tidak ada data valid untuk diinput setelah difilter.'], 'skipped_details': [], 'success_details': [], 'failed_details': [], 'backup_files': {}}
     
+    # Always return every uploaded year, even when it has no eligible receipts.
+    for year, excel_file in master_files.items():
+        if str(year) not in results['backup_files'] and os.path.exists(excel_file):
+            results['backup_files'][str(year)] = create_backup_file(excel_file)
+
     # FIX 4b: kembalikan valid_data (bukan df_final) agar Status_Input sheet berisi data yang diproses
     return valid_data, results
 
@@ -1253,6 +1266,8 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
     # BARU: Fungsi untuk menyesuaikan lebar kolom
     def auto_adjust_column_width(worksheet):
         """Menyesuaikan lebar kolom di worksheet berdasarkan konten terpanjang."""
+        worksheet.freeze_panes = 'A2'
+        worksheet.auto_filter.ref = worksheet.dimensions
         for col in worksheet.columns:
             max_length = 0
             column_letter = col[0].column_letter
@@ -1262,8 +1277,18 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
                         max_length = len(str(cell.value))
                 except:
                     pass
-            adjusted_width = (max_length + 2)
+            adjusted_width = min(60, max(10, max_length + 2))
             worksheet.column_dimensions[column_letter].width = adjusted_width
+            for cell in col:
+                if cell.row == 1:
+                    cell.alignment = Alignment(vertical='center', wrap_text=True)
+                    worksheet.row_dimensions[1].height = 32
+                elif isinstance(cell.value, str) and ('\n' in cell.value or len(cell.value) > adjusted_width - 2):
+                    cell.alignment = Alignment(vertical='top', wrap_text=True)
+                    lines = sum(max(1, (len(line) + int(adjusted_width) - 3) // (int(adjusted_width) - 2))
+                                for line in cell.value.split('\n'))
+                    dimension = worksheet.row_dimensions[cell.row]
+                    dimension.height = max(dimension.height or 15, lines * 16)
     
     # Siapkan data untuk sheet Kasda dan Denda
     df_kasda = df_final.copy()
@@ -1370,7 +1395,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
         month_year_format = 'MMM-YY'  # BARU: Format tampilan Bulan-Tahun
 
         # 2. Definisikan kolom-kolom tanggal
-        date_cols = ['Tanggal Setor', 'Tanggal Kasda', 'Tanggal Perjanjian', 'Tanggal_Kasda']
+        date_cols = ['Tanggal Setor', 'Tanggal Kasda', 'Tanggal Perjanjian', 'Tanggal_Kasda', 'Tanggal_Bayar_Kasda']
         
         # 3. Definisikan kolom-kolom uang per sheet
         money_cols = {
@@ -1591,9 +1616,9 @@ def main():
                 "Pilih file Kasda Sewa (opsional)",
                 type=["xlsx"],
                 key="kasda_sewa_file",
-                help="Upload rekap pendapatan dengan sheet Sewa. Penerimaan dicocokkan melalui referensi atau urutan Waktu Bayar, dengan pemeriksaan tanggal dan nominal.",
+                help="Upload Kasda Inawa dengan sheet per tanggal atau format lama sheet Sewa. Sheet dipilih sesuai tanggal rekening koran, lalu dicocokkan melalui referensi atau urutan waktu bayar dan nominal.",
             )
-            st.caption("Kasda Sewa melengkapi transaksi QRIS/VA agar penghuni dan periode sewanya ikut terdeteksi.")
+            st.caption("Kasda Sewa melengkapi transaksi QRIS/VA. Workbook bulanan tetap urut tanggal; hanya sheet sesuai tanggal rekening koran yang diproses.")
         
         with col2:
             st.markdown("#### 📊 Master Excel")

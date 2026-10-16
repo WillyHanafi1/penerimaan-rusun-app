@@ -108,56 +108,122 @@ def _unit_code(rusun, gedung, lantai, unit):
     return ''
 
 
-def read_kasda_sewa(path):
-    """Read detail rows only, excluding repeated headers, totals and the Denda sheet."""
+def _kasda_headers(values):
+    """Normalize the legacy Sewa columns and the daily Inawa template."""
+    keys = {_key(v): i for i, v in enumerate(values) if _text(v)}
+    aliases = {
+        'METODEBAYAR': ('KANALBAYAR',),
+        'WAKTUBAYAR': ('WAKTUBAYARWIB',),
+        'GD': ('GEDUNG',), 'LT': ('LANTAI',), 'UNIT': ('NOHUNIAN',),
+    }
+    for name, alternatives in aliases.items():
+        if name not in keys:
+            for alias in alternatives:
+                if alias in keys:
+                    keys[name] = keys[alias]
+                    break
+    # Inawa merges D:F only in the header; detail rows contain building/floor/unit.
+    if 'NOMORHUNIAN' in keys and not {'GD', 'LT', 'UNIT'}.issubset(keys):
+        start = keys['NOMORHUNIAN']
+        keys.update(GD=start, LT=start + 1, UNIT=start + 2)
+    required = {'NOURUT', 'TANGGALKASDA', 'GD', 'LT', 'UNIT', 'JUMLAH',
+                'BULAN', 'WAKTUBAYAR', 'METODEBAYAR'}
+    return keys if required.issubset(keys) else {}
+
+
+def _daily_sheet_date(name):
+    match = re.fullmatch(r'(\d{1,2})-(\d{1,2})-(\d{4})', name.strip())
+    if match:
+        try:
+            return pd.Timestamp(datetime(int(match[3]), int(match[2]), int(match[1])))
+        except ValueError:
+            pass
+    return None
+
+
+def read_kasda_sewa(path, transaction_dates=None):
+    """Read daily sheets selected by bank dates, or the legacy Sewa sheet.
+
+    Sheet position is irrelevant. Subtotals, repeated headers, and Denda are
+    excluded; receipts from other dates never enter a daily reconciliation.
+    """
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     records = []
     try:
-        sheet_name = next((s for s in workbook.sheetnames if s.strip().lower() == 'sewa'), None)
-        if sheet_name is None:
-            raise ValueError("File Kasda Sewa harus memiliki sheet 'Sewa'.")
-        headers, rusun = {}, ''
-        required = {'NOURUT', 'TANGGALKASDA', 'GD', 'LT', 'UNIT', 'JUMLAH', 'BULAN', 'WAKTUBAYAR', 'METODEBAYAR'}
-        for row_number, values in enumerate(workbook[sheet_name].iter_rows(values_only=True), 1):
-            keys = {_key(v): i for i, v in enumerate(values) if _text(v)}
-            if required.issubset(keys):
-                headers = keys
-                continue
-            if _text(values[0]).upper().startswith('RUSUNAWA'):
-                rusun = _text(values[0])
-                continue
-            if not headers:
-                continue
-            def value(column):
-                return values[headers[column]] if column in headers else None
-            if not re.fullmatch(r'\d+(?:\.0)?', _text(value('NOURUT'))):
-                continue
-            month, year = _period(value('BULAN'))
-            code = _unit_code(rusun, value('GD'), value('LT'), value('UNIT'))
-            date, amount = _date(value('TANGGALKASDA')), _money(value('JUMLAH'))
-            method = _key(value('METODEBAYAR'))
-            issues = []
-            if not code:
-                issues.append('Identitas rusun/gedung/lantai/unit tidak valid')
-            if not month or not year:
-                issues.append('Periode sewa tidak valid')
-            if pd.isna(date):
-                issues.append('Tanggal Kasda tidak valid')
-            if amount is None or amount <= 0:
-                issues.append('Jumlah penerimaan tidak valid')
-            if method not in ('QRIS', 'VA'):
-                issues.append('Metode bayar belum didukung untuk pencocokan')
-            records.append({
-                'Baris_Kasda': row_number, 'Rusun_Kasda': rusun,
-                'Kode_8_Digit': code, 'Bulan': month, 'Tahun': year,
-                'Tanggal_Kasda': date, 'Waktu_Bayar_Kasda': _time(value('WAKTUBAYAR')),
-                'Metode_Bayar_Kasda': method, 'No_Referensi_Kasda': _text(value('NOREFERENSI')),
-                'Nama_Kasda': _text(value('NAMAPENGHUNI')),
-                'Jumlah_Kasda': amount, 'Denda_Kasda': _money(value('DENDA')),
-                'Keterangan_Pencocokan': ' | '.join(issues),
-            })
+        dates = None
+        if transaction_dates is not None:
+            dates = {d for value in transaction_dates if pd.notna(d := _date(value))}
+            if not dates:
+                raise ValueError('Tanggal rekening koran tidak dapat dibaca untuk memilih sheet Kasda.')
+        daily = [(name, day) for name in workbook.sheetnames if (day := _daily_sheet_date(name)) is not None]
+        if daily:
+            selected = [name for name, day in daily if dates is None or day in dates]
+            if not selected:
+                labels = ', '.join(d.strftime('%d-%m-%Y') for d in sorted(dates))
+                raise ValueError(f'Sheet Kasda untuk tanggal rekening koran ({labels}) tidak tersedia.')
+        else:
+            selected = [s for s in workbook.sheetnames if s.strip().lower() == 'sewa']
+            if not selected:
+                raise ValueError("File Kasda harus memiliki sheet 'Sewa' atau sheet harian bernama D-M-YYYY.")
+        for sheet_name in selected:
+            headers, rusun, found_header = {}, '', False
+            for row_number, values in enumerate(workbook[sheet_name].iter_rows(values_only=True), 1):
+                keys = _kasda_headers(values)
+                if keys:
+                    headers, found_header = keys, True
+                    continue
+                if not values:
+                    continue
+                if _text(values[0]).upper().startswith('RUSUNAWA'):
+                    rusun = _text(values[0])
+                    headers = {}
+                    continue
+                if not headers:
+                    continue
+                def value(column):
+                    index = headers.get(column)
+                    return values[index] if index is not None and index < len(values) else None
+                if not re.fullmatch(r'\d+(?:\.0)?', _text(value('NOURUT'))):
+                    continue
+                month, year = _period(value('BULAN'))
+                code = _unit_code(rusun, value('GD'), value('LT'), value('UNIT'))
+                kasda_date = _date(value('TANGGALKASDA'))
+                # Bank posting follows the payment date, which can differ from Kasda.
+                paid_date = _date(value('TANGGALSETOR')) if 'TANGGALSETOR' in headers else kasda_date
+                if dates is not None and pd.notna(paid_date) and paid_date not in dates:
+                    continue
+                amount, method = _money(value('JUMLAH')), _key(value('METODEBAYAR'))
+                issues = []
+                if not code:
+                    issues.append('Identitas rusun/gedung/lantai/unit tidak valid')
+                if not month or not year:
+                    issues.append('Periode sewa tidak valid')
+                if pd.isna(paid_date):
+                    issues.append('Tanggal pembayaran tidak valid')
+                if amount is None or amount <= 0:
+                    issues.append('Jumlah penerimaan tidak valid')
+                if method not in ('QRIS', 'VA'):
+                    issues.append('Metode bayar belum didukung untuk pencocokan')
+                records.append({
+                    'Sheet_Kasda': sheet_name, 'Baris_Kasda': row_number, 'Rusun_Kasda': rusun,
+                    'Kode_8_Digit': code, 'Bulan': month, 'Tahun': year,
+                    'Tanggal_Kasda': kasda_date, 'Tanggal_Bayar_Kasda': paid_date,
+                    'Waktu_Bayar_Kasda': _time(value('WAKTUBAYAR')),
+                    'Metode_Bayar_Kasda': method, 'No_Referensi_Kasda': _text(value('NOREFERENSI')),
+                    'Nama_Kasda': _text(value('NAMAPENGHUNI')),
+                    'Jumlah_Kasda': amount, 'Denda_Kasda': _money(value('DENDA')),
+                    'Biaya_Lain_Kasda': _money(value('BIAYALAIN')),
+                    'Nomor_Dokumen_Kasda': _text(value('NOMORSKRDSTRD')),
+                    'Keterangan_Pencocokan': ' | '.join(issues),
+                })
+            if not found_header:
+                raise ValueError(f'Header penerimaan tidak ditemukan pada sheet {sheet_name}. Periksa format Kasda.')
         if not records:
-            raise ValueError('Tidak ada baris penerimaan yang terbaca pada sheet Sewa. Periksa header file.')
+            # A valid empty daily sheet is different from a missing/broken header.
+            return pd.DataFrame(columns=['Sheet_Kasda', 'Baris_Kasda', 'Tanggal_Kasda',
+                'Tanggal_Bayar_Kasda', 'Waktu_Bayar_Kasda', 'Metode_Bayar_Kasda',
+                'No_Referensi_Kasda', 'Kode_8_Digit', 'Bulan', 'Tahun', 'Nama_Kasda',
+                'Jumlah_Kasda', 'Denda_Kasda', 'Keterangan_Pencocokan'])
     finally:
         workbook.close()
     return pd.DataFrame(records)
@@ -242,7 +308,7 @@ def reconcile_kasda_sewa(detected, manual, kasda):
             ref = _key(receipt['No_Referensi_Kasda'])
             if transaction['method'] == 'QRIS':
                 ref = ref[-6:] if len(ref) >= 6 else ''
-            if (ref == transaction['ref'] and receipt['Tanggal_Kasda'] == transaction['date']
+            if (ref == transaction['ref'] and receipt.get('Tanggal_Bayar_Kasda', receipt['Tanggal_Kasda']) == transaction['date']
                     and receipt['Metode_Bayar_Kasda'] == transaction['method']):
                 same_reference.append(k)
                 if receipt['Jumlah_Kasda'] == transaction['amount']:
@@ -256,7 +322,7 @@ def reconcile_kasda_sewa(detected, manual, kasda):
 
     for date in sorted({x['date'] for x in candidates.values()}):
         bank_day = [b for b, row in candidates.items() if row['date'] == date]
-        kasda_day = [k for k, row in receipts.items() if row['Tanggal_Kasda'] == date]
+        kasda_day = [k for k, row in receipts.items() if row.get('Tanggal_Bayar_Kasda', row['Tanggal_Kasda']) == date]
         anchors = [(b, matches[b][0]) for b in bank_day if b in matches]
         if any(not receipts[k]['Waktu_Bayar_Kasda'] for _, k in anchors):
             continue
@@ -284,6 +350,8 @@ def reconcile_kasda_sewa(detected, manual, kasda):
     promoted = set()
     metadata = ['Baris_Kasda', 'Waktu_Bayar_Kasda', 'No_Referensi_Kasda',
                 'Nama_Kasda', 'Jumlah_Kasda', 'Denda_Kasda', 'Metode_Bayar_Kasda']
+    metadata += [name for name in ['Sheet_Kasda', 'Tanggal_Kasda', 'Tanggal_Bayar_Kasda',
+                 'Biaya_Lain_Kasda', 'Nomor_Dokumen_Kasda'] if name in audit]
     for column in metadata + ['Metode_Pencocokan', 'Sumber_Deteksi']:
         if column not in bank:
             bank[column] = pd.Series([None] * len(bank), dtype=object)

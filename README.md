@@ -7,17 +7,22 @@ Aplikasi web untuk memproses data penerimaan rusun dari PDF Bank Statement dan m
 Di bawah upload PDF terdapat upload **Kasda Sewa**, misalnya file `rekap-pendapatan-2026-09-04 (2).xlsx`.
 Pilih tahun master yang akan diproses, unggah master pada slot tahunnya, lalu jalankan proses otomatis.
 
-- Aplikasi membaca baris penerimaan pada sheet `Sewa`; judul kelompok rusun menentukan lokasi. Baris subtotal dan sheet `Denda` tidak dihitung lagi sebagai transaksi.
+- Aplikasi mendukung ekspor Inawa terbaru dari `/admin/reports`: satu workbook dengan sheet per tanggal, misalnya `1-10-2026` sampai `14-10-2026`. Urutan sheet tetap kronologis. Aplikasi memilih **sheet sesuai tanggal rekening koran**, bukan sheet pertama/terakhir; tanggal lain tidak ikut diproses. Rekening koran beberapa hari dapat memilih beberapa sheet sekaligus. Sheet yang tidak tersedia atau header rusak menghasilkan pesan jelas, sedangkan sheet kosong yang valid tetap dapat diproses.
+- Format lama dengan sheet `Sewa` tetap didukung. Judul kelompok rusun menentukan lokasi. Baris subtotal dan sheet `Denda` tidak dihitung lagi sebagai transaksi.
+- Pada template harian Inawa, header gabungan `NOMOR HUNIAN` memetakan gedung/lantai/unit dari tiga kolom detail. `KANAL BAYAR` dibaca sebagai metode bayar dan `WAKTU BAYAR (WIB)` sebagai waktu pembayaran. Referensi lengkap, nomor SKRD/STRD, biaya lain, sheet sumber, dan baris sumber dibawa ke audit pencocokan.
+- Pencocokan rekening koran memakai `Tanggal Setor` (tanggal pembayaran). `Tanggal Kasda` disimpan terpisah karena bisa berbeda hari. Untuk format lama tanpa `Tanggal Setor`, tanggal pencocokan mengikuti `Tanggal Kasda`.
 - Nomor referensi QRIS (enam karakter terakhir) atau VA dicocokkan dengan rekening koran, beserta tanggal dan nominal pembayaran.
 - Jika referensi belum cocok, `WAKTU BAYAR` diurutkan dari paling awal dan dicocokkan dengan urutan pembayaran di PDF. Baris dengan nominal berbeda dilewati, kemudian pencocokan dilanjutkan ke baris berikutnya. Jumlah baris kedua sumber boleh berbeda. Tanggal/metode harus sesuai, pasangan referensi tetap menjadi batas urutan, dan pasangan ambigu tidak dipaksakan.
 - Narasi `Payment QRIS ... MPAN ... RETRIBUSI` dibedakan dari pelimpahan yang hanya menyebut QRIS. VA mendukung kanal TLR maupun MBL. Transaksi debit dan transfer lain tidak memakai pasangan urutan Kasda.
 - Transaksi bank yang tidak cocok dan penerimaan Kasda tanpa pasangan masuk `Cek Manual`, disertai alasan serta jenis sumber. Nominal sumber Kasda disimpan di `Jumlah_Kasda`, tanpa menciptakan kredit bank tambahan.
 - Baris yang gagal menemukan kode/periode pada master dipindahkan ke `Cek Manual` sebelum perhitungan denda. Semua baris yang belum terdeteksi tersebut tidak masuk `Status_Input`, Kasda/Denda otomatis, atau input master.
+- Tarif master yang kosong/nol juga masuk `Cek Manual`; seluruh pembayaran tidak boleh otomatis dianggap denda. Lengkapi master lalu proses ulang transaksi tersebut.
 - Kode hunian dibentuk dari kelompok rusun, GD, LT, dan UNIT. Bulan/tahun sewa diambil dari kolom `BULAN`, bukan tahun anggaran atau tanggal pembayaran.
 - Transaksi yang cocok masuk `Status_Input` dan mengikuti aturan input master yang sama. Sel tujuan yang sudah terisi tetap berstatus `Skip - Sudah Terisi`.
 - Pada baris baru yang diinput ke Master 2025/2026, kolom `KETERANGAN` otomatis diisi `QRIS` atau `VA`. Pewarnaan pelunasan disesuaikan: `#C5D9F1` (biru muda) untuk QRIS dan `#D9B5CA` (ungu muda) untuk VA.
 - Sheet tambahan `Pencocokan Kasda` mencatat semua penerimaan Kasda, ID transaksi bank, cara pencocokan, serta alasan bila belum cocok. Kolom sumber dan referensi juga tersedia di `Status_Input`.
 - Nama penghuni, tarif, dan perhitungan denda tetap mengikuti master sesuai periode. `Denda_Kasda` disertakan sebagai pembanding.
+- Kedua master yang diunggah tetap tersedia untuk diunduh, termasuk tahun tanpa penerimaan baru. Master tanpa perubahan disalin identik. Hasil rumus tarif tetap seperti `=280000+90000` dipertahankan ketika master disimpan agar masih terbaca saat digunakan lagi untuk proses harian; rumus total tetap dihitung ulang oleh Excel. Proses ulang pada master hasil melewati sel yang sudah terisi.
 
 Untuk memproses file lokal tanpa browser, gunakan `python scripts/process_files.py --help`.
 Hasil ditulis ke folder baru; checksum file sumber diperiksa agar master dan rekening koran asli tetap utuh.
