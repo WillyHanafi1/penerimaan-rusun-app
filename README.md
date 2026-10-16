@@ -42,6 +42,10 @@ Format unduhan laporan menghapus kolom teknis `Urutan_Rekening_Koran`, `ID_Trans
 `Sumber_Deteksi`, dan `Baris_Kasda` dari seluruh sheet.
 Data tersebut tetap dipakai di dalam proses pencocokan. Semua baris laporan memiliki
 tinggi 18, tanpa wrap text, dengan lebar kolom menyesuaikan isi.
+Pada sheet `Status_Input`, sukses biasa dengan keterangan
+`Data berhasil diinput ke <sheet> row <nomor>` tetap memakai warna normal.
+Seluruh baris dengan catatan tambahan (termasuk rincian memakai Kasda), status
+dilewati, gagal, atau belum diproses diberi warna `#F2DCDB` agar mudah diperiksa.
 Pemisah baris di narasi unduhan diganti spasi agar seluruh teks tampil dalam satu baris.
 
 Sheet `Status_Input` berisi tepat 22 kolom dengan urutan: `No`, `Posting Date`,

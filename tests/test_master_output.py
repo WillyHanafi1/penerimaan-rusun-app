@@ -13,6 +13,55 @@ from master_formula_cache import NS, save_master
 
 
 class MasterOutputTests(unittest.TestCase):
+    def test_status_review_rule_keeps_only_plain_success_normal(self):
+        cases = [
+            ('Berhasil Input', 'Data berhasil diinput ke LG  row 273', False),
+            ('Berhasil Input', 'Data   berhasil diinput ke MELONG row 222', False),
+            ('Berhasil Input', 'Data berhasil diinput ke CIGUGUR row 35', False),
+            ('Berhasil Input', 'Data berhasil diinput ke MELONG row 267; rincian sewa/denda memakai Kasda', True),
+            ('Berhasil Input', 'Data berhasil diinput ke LG row 205; perlu periksa tarif', True),
+            ('Berhasil Input', 'Error penulisan master', True),
+            ('Skip - Sudah Terisi', 'Sudah terisi', True),
+            ('Gagal', 'Kombinasi kode tidak ditemukan', True),
+            ('Belum Diproses', '', True),
+        ]
+        for status, description, expected in cases:
+            with self.subTest(status=status, description=description):
+                self.assertEqual(app.status_input_requires_review(status, description), expected)
+
+    def test_status_export_colors_the_entire_review_row_without_changing_data(self):
+        data = pd.DataFrame([dict(ID_Transaksi=f'BANK-{i}', Kode_8_Digit=f'0101010{i}',
+            Bulan='Oktober', Tahun='2026', Denda=5000, _tariff_from_kasda=i == 3,
+            **{'Posting Date': '14 Oct 2026', 'Credit Transaction': 105000,
+               'Nama Penghuni': 'Contoh', 'Tanggal Perjanjian Sewa': '',
+               'Sewa Hunian': 100000, 'Sewa Lahan Lantai 1': 0}) for i in range(1, 7)])
+        original = data.copy(deep=True)
+        def detail(i, **values):
+            return dict(ID_Transaksi=f'BANK-{i}', Kode_8_Digit=f'0101010{i}', Bulan='Oktober', **values)
+        results = {
+            'success_details': [detail(1, Sheet='LG ', Row=273, Denda=5000),
+                                detail(2, Sheet='MELONG', Row=222, Denda=5000),
+                                detail(3, Sheet='MELONG', Row=267, Denda=5000)],
+            'skipped_details': [detail(4, Reason='Sudah terisi')],
+            'failed_details': [detail(5, Reason='Error penulisan master')],
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            path = app.create_export_excel(results, data, data, data.head(0), output_dir=folder)
+            wb = openpyxl.load_workbook(path)
+            sheet = wb['Status_Input']
+            headers = {c.value:c.column for c in sheet[1]}
+            for row in range(2, 8):
+                expected_review = row >= 4
+                self.assertTrue(all(
+                    (cell.fill.fill_type == 'solid' and cell.fill.fgColor.rgb == '00F2DCDB') == expected_review
+                    for cell in sheet[row]))
+                self.assertEqual(sheet.cell(row, headers['Credit Transaction']).value, 105000)
+                self.assertEqual(sheet.row_dimensions[row].height, 18)
+            self.assertIn('memakai Kasda', sheet.cell(4, headers['Keterangan_Input']).value)
+            self.assertTrue(all(c.fill.fgColor.rgb != '00F2DCDB' for c in sheet[1]))
+            self.assertTrue(all(c.fill.fgColor.rgb != '00F2DCDB' for row in wb['Kasda'] for c in row))
+        pd.testing.assert_frame_equal(data, original)
+
     def test_verified_kasda_fees_allow_payment_but_master_identity_and_rates_stay_blank(self):
         for method in ('Referensi + tanggal + nominal',
                        'Identitas hunian + periode + tanggal + nominal'):
@@ -56,6 +105,7 @@ class MasterOutputTests(unittest.TestCase):
                 self.assertIsNone(status.cell(2, headers['Nama Penghuni']).value)
                 self.assertEqual(status.cell(2, headers['Sewa Hunian']).value, 300000)
                 self.assertIn('memakai Kasda', status.cell(2, headers['Keterangan_Input']).value)
+                self.assertTrue(all(c.fill.fgColor.rgb == '00F2DCDB' for c in status[2]))
 
     def test_blank_tariff_fallback_rejects_incomplete_untrusted_or_unbalanced_kasda(self):
         base = dict(Kode_8_Digit='01010101', Bulan='Oktober', Tahun='2026',

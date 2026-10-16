@@ -1235,6 +1235,17 @@ REPORT_STATUS_COLUMNS = (
 )
 
 
+STATUS_INPUT_REVIEW_COLOR = 'F2DCDB'
+
+
+def status_input_requires_review(status, description):
+    """Only an ordinary successful master write keeps its normal row fill."""
+    description = ' '.join(str(description).split())
+    ordinary_success = re.fullmatch(
+        r'Data berhasil diinput ke [^;]+ row [1-9]\d*', description)
+    return status != 'Berhasil Input' or ordinary_success is None
+
+
 def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_audit=None, output_dir=None):
     """Membuat file Excel hasil dengan beberapa sheet"""
     
@@ -1534,6 +1545,13 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
 
         for sheet_name in workbook.sheetnames:
             format_report_layout(workbook[sheet_name])
+            if sheet_name == 'Status_Input':
+                status_sheet = workbook[sheet_name]
+                review_fill = PatternFill(fill_type='solid', fgColor=STATUS_INPUT_REVIEW_COLOR)
+                for excel_row, (_, record) in enumerate(df_export_status.iterrows(), start=2):
+                    if status_input_requires_review(record['Status_Input'], record['Keterangan_Input']):
+                        for cell in status_sheet[excel_row]:
+                            cell.fill = review_fill
     
     return export_filename
 
