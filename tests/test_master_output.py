@@ -19,6 +19,7 @@ class MasterOutputTests(unittest.TestCase):
             'Waktu_Bayar_Kasda', 'No_Referensi_Kasda', 'Nama_Kasda', 'Sheet_Kasda',
             'Tanggal_Kasda', 'Tanggal_Bayar_Kasda', 'Biaya_Lain_Kasda',
             'Nomor_Dokumen_Kasda', 'Metode_Pencocokan',
+            'Jumlah_Kasda', 'Sumber_Deteksi', 'Baris_Kasda',
         }
         rows = []
         for index in (1, 2):
@@ -52,6 +53,13 @@ class MasterOutputTests(unittest.TestCase):
                     self.assertTrue(all(dimension.height == 18 for dimension in sheet.row_dimensions.values()))
                     self.assertTrue(all(not cell.alignment.wrap_text for row in sheet for cell in row))
                 status = workbook['Status_Input']
+                self.assertEqual([cell.value for cell in status[1]], [
+                    'No', 'Posting Date', 'Effective Date', 'Narasi', 'Debit Transaction',
+                    'Credit Transaction', 'Balance', 'Kode_8_Digit', 'Rusunawa', 'Gedung',
+                    'Lantai', 'No Hunian', 'Nama Penghuni', 'Tanggal Perjanjian Sewa',
+                    'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda', 'Bulan', 'Tahun',
+                    'Status_Input', 'Keterangan_Input',
+                ])
                 headers = {cell.value: cell.column for cell in status[1]}
                 self.assertEqual([status.cell(row, headers['Status_Input']).value for row in (2, 3)],
                                  ['Berhasil Input', 'Skip - Sudah Terisi'])

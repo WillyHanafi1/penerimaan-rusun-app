@@ -1175,7 +1175,16 @@ REPORT_EXCLUDED_COLUMNS = frozenset({
     'Waktu_Bayar_Kasda', 'No_Referensi_Kasda', 'Nama_Kasda', 'Sheet_Kasda',
     'Tanggal_Kasda', 'Tanggal_Bayar_Kasda', 'Biaya_Lain_Kasda',
     'Nomor_Dokumen_Kasda', 'Metode_Pencocokan',
+    'Jumlah_Kasda', 'Sumber_Deteksi', 'Baris_Kasda',
 })
+
+REPORT_STATUS_COLUMNS = (
+    'No', 'Posting Date', 'Effective Date', 'Narasi', 'Debit Transaction',
+    'Credit Transaction', 'Balance', 'Kode_8_Digit', 'Rusunawa', 'Gedung',
+    'Lantai', 'No Hunian', 'Nama Penghuni', 'Tanggal Perjanjian Sewa',
+    'Sewa Hunian', 'Sewa Lahan Lantai 1', 'Denda', 'Bulan', 'Tahun',
+    'Status_Input', 'Keterangan_Input',
+)
 
 
 def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_audit=None, output_dir=None):
@@ -1358,7 +1367,8 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
 
     # Kolom teknis tetap dipakai saat mencocokkan/input master; hapus hanya
     # pada salinan unduhan setelah status per transaksi selesai ditentukan.
-    df_export_status = df_export_status.drop(columns=REPORT_EXCLUDED_COLUMNS, errors='ignore')
+    df_status_details = df_export_status
+    df_export_status = df_status_details.reindex(columns=REPORT_STATUS_COLUMNS, fill_value='')
     df_non_rusun_export = pd.DataFrame()
     df_kasda_audit_export = (
         df_kasda_audit.drop(columns=REPORT_EXCLUDED_COLUMNS, errors='ignore')
@@ -1370,7 +1380,7 @@ def create_export_excel(results, valid_data, df_final, df_non_rusun, df_kasda_au
         df_export_status.to_excel(writer, sheet_name='Status_Input', index=False)
         
         # Sheet 2: Data Cek Manual (Non-Rusun + Gagal Mapping Kode)
-        df_tidak_ditemukan = df_export_status[df_export_status['Keterangan_Input'] == 'Kombinasi kode tidak ditemukan'].copy()
+        df_tidak_ditemukan = df_status_details[df_status_details['Keterangan_Input'] == 'Kombinasi kode tidak ditemukan'].copy()
         
         # Gabungkan data non-rusun dengan data yang tidak ditemukan kodenya di Master
         df_non_rusun_final = pd.concat([df_non_rusun, df_tidak_ditemukan], ignore_index=True)

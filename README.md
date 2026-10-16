@@ -30,10 +30,17 @@ Hasil ditulis ke folder baru; checksum file sumber diperiksa agar master dan rek
 Format unduhan laporan menghapus kolom teknis `Urutan_Rekening_Koran`, `ID_Transaksi`,
 `Narasi_Clean`, `Has_SETORTUNAI`, `Waktu_Bayar_Kasda`, `No_Referensi_Kasda`,
 `Nama_Kasda`, `Sheet_Kasda`, `Tanggal_Kasda`, `Tanggal_Bayar_Kasda`,
-`Biaya_Lain_Kasda`, `Nomor_Dokumen_Kasda`, dan `Metode_Pencocokan` dari seluruh sheet.
+`Biaya_Lain_Kasda`, `Nomor_Dokumen_Kasda`, `Metode_Pencocokan`, `Jumlah_Kasda`,
+`Sumber_Deteksi`, dan `Baris_Kasda` dari seluruh sheet.
 Data tersebut tetap dipakai di dalam proses pencocokan. Semua baris laporan memiliki
 tinggi 18, tanpa wrap text, dengan lebar kolom menyesuaikan isi.
 Pemisah baris di narasi unduhan diganti spasi agar seluruh teks tampil dalam satu baris.
+
+Sheet `Status_Input` berisi tepat 21 kolom dengan urutan: `No`, `Posting Date`,
+`Effective Date`, `Narasi`, `Debit Transaction`, `Credit Transaction`, `Balance`,
+`Kode_8_Digit`, `Rusunawa`, `Gedung`, `Lantai`, `No Hunian`, `Nama Penghuni`,
+`Tanggal Perjanjian Sewa`, `Sewa Hunian`, `Sewa Lahan Lantai 1`, `Denda`,
+`Bulan`, `Tahun`, `Status_Input`, dan `Keterangan_Input`.
 
 ## 🚀 Fitur Utama
 
