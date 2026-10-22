@@ -9,7 +9,7 @@ import pandas as pd
 import openpyxl
 
 import app
-from kasda_matching import read_kasda_sewa, reconcile_kasda_sewa, _period, _unit_code, _va_reference
+from kasda_matching import read_kasda_sewa, reconcile_kasda_sewa, _period, _unit_code, _va_reference, _time
 
 
 def bank_row(ref='ABC123', amount=400000, **kwargs):
@@ -33,6 +33,73 @@ def match(bank_rows, receipts):
 
 
 class KasdaMatchingTests(unittest.TestCase):
+    def test_datetime_text_anchor_does_not_block_after_16_payment(self):
+        workbook = self.daily_workbook(names=('14-10-2026',), empty=True)
+        sheet = workbook['14-10-2026']
+        for no, clock, ref, amount, unit in (
+            (1, '14-10-2026 15:00', '000000ANCHOR', 390000, 1),
+            (2, '14-10-2026 16:30', '000000UNUSED', 400000, 2),
+        ):
+            sheet.append([no, datetime(2026, 10, 14), datetime(2026, 10, 15),
+                          'D', 'V', unit, 'Contoh', datetime(2025, 1, 1), amount, 0,
+                          0, amount, datetime(2026, 10, 1), 'QRIS', clock, ref])
+        payload = BytesIO()
+        workbook.save(payload)
+        payload.seek(0)
+        bank = pd.DataFrame([
+            bank_row('ANCHOR', 390000, **{'Posting Date': '14 Oct 2026'}),
+            bank_row('LATE01', 400000, **{'Posting Date': '14 Oct 2026'}),
+        ])
+        detected, manual, audit = app.process_bank_sources(bank, payload)
+        self.assertTrue(manual.empty)
+        self.assertEqual(detected['Kode_8_Digit'].tolist(), ['02040501', '02040502'])
+        self.assertEqual(audit['Waktu_Bayar_Kasda'].tolist(), ['15:00:00', '16:30:00'])
+
+    def test_payment_time_formats_cover_the_entire_wib_calendar_day(self):
+        for value, expected in (
+            ('14-10-2026 16:00', '16:00:00'),
+            ('14-10-2026 16:00:01', '16:00:01'),
+            ('14-10-2026 23.59', '23:59:00'),
+            ('2026-10-14 18:52:13', '18:52:13'),
+            ('2026-10-14T18:52:13', '18:52:13'),
+            (datetime(2026, 10, 14, 23, 59, 59), '23:59:59'),
+            (0.75, '18:00:00'),
+            (None, ''),
+            (pd.NaT, ''),
+            ('24:30', ''),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(_time(value), expected)
+
+    def test_qris_and_va_are_not_cut_off_at_16(self):
+        for clock in ('15:59:59', '16:00:00', '16:00:01', '23:59:59'):
+            for method in ('QRIS', 'VA'):
+                with self.subTest(clock=clock, method=method):
+                    bank = bank_row() if method == 'QRIS' else bank_row(
+                        Narasi='MBL-M001-983616 PAY VA MBL 1295010101010926/Retribusi')
+                    reference = '000000ABC123' if method == 'QRIS' else '1295010101010926'
+                    detected, manual, audit = match([bank], [receipt(
+                        ref=reference, time=clock, Metode_Bayar_Kasda=method)])
+                    self.assertEqual(len(detected), 1)
+                    self.assertTrue(manual.empty)
+                    self.assertEqual(audit.iloc[0]['Status_Pencocokan'], 'Cocok')
+                    self.assertEqual(detected.iloc[0]['Posting Date'], bank['Posting Date'])
+
+    def test_after_16_still_requires_an_unambiguous_bank_pair(self):
+        cases = [
+            ([bank_row(amount=390000)], [receipt(time='23:00:00')]),
+            ([bank_row(Narasi='PELIMP VIA QRIS RETRIBUSI')], [receipt(time='23:00:00')]),
+            ([bank_row('NOTREF')], [receipt(ref='FIRST1', time='17:00:00'),
+                                    receipt(ref='SECOND', time='18:00:00')]),
+            ([bank_row()], [receipt(time='23:00:00', Tanggal_Kasda=pd.Timestamp('2026-09-05'))]),
+        ]
+        for banks, receipts in cases:
+            with self.subTest(banks=banks, receipts=receipts):
+                detected, manual, audit = match(banks, receipts)
+                self.assertTrue(detected.empty)
+                self.assertTrue(audit['Status_Pencocokan'].ne('Cocok').all())
+                self.assertTrue((manual['Jenis_Baris'] == 'Kasda tanpa pasangan bank').any())
+
     def daily_workbook(self, names=('13-10-2026', '14-10-2026', '15-10-2026'), empty=False):
         workbook = openpyxl.Workbook()
         workbook.remove(workbook.active)

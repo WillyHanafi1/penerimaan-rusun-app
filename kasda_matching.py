@@ -68,6 +68,8 @@ def _period(value):
 
 
 def _time(value):
+    if pd.isna(value):
+        return ''
     if isinstance(value, datetime):
         value = value.time()
     if isinstance(value, time):
@@ -75,7 +77,14 @@ def _time(value):
     if isinstance(value, (float, int)) and 0 <= value < 1:
         seconds = round(value * 86400)
         return f'{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}'
-    for fmt in ('%H:%M:%S', '%H:%M'):
+    # Excel can contain native datetimes or the displayed WIB datetime copied
+    # as text. Losing an anchor's time disables ordered matching for the day,
+    # including otherwise valid payments after 16:00.
+    for fmt in ('%H:%M:%S', '%H:%M', '%H.%M',
+                '%d-%m-%Y %H:%M:%S', '%d-%m-%Y %H:%M', '%d-%m-%Y %H.%M',
+                '%d/%m/%Y %H:%M:%S', '%d/%m/%Y %H:%M',
+                '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M',
+                '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M'):
         try:
             return datetime.strptime(_text(value), fmt).strftime('%H:%M:%S')
         except ValueError:

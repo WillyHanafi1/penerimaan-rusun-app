@@ -1,4 +1,6 @@
 from io import BytesIO
+from datetime import datetime
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,6 +15,59 @@ from master_formula_cache import NS, save_master
 
 
 class MasterOutputTests(unittest.TestCase):
+    def test_after_16_bank_matched_payment_reaches_master_and_replay_is_skipped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'master.xlsx'
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = 'CIGUGUR'
+            for column in ('B', 'C', 'D'):
+                sheet[f'{column}3'] = '01'
+            sheet['CU3'] = 'Penghuni Master'
+            sheet['CW3'] = 300000
+            workbook.save(source)
+            original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            kasda = openpyxl.Workbook()
+            ws = kasda.active
+            ws.title = '14-10-2026'
+            ws.append(['RUSUNAWA CIGUGUR TYPE 21'])
+            ws.append(['NO. URUT', 'Tanggal Setor', 'Tanggal Kasda', 'GD', 'LT', 'UNIT',
+                       'NAMA PENGHUNI', 'SEWA HUNIAN', 'PARKIR', 'DENDA', 'JUMLAH',
+                       'BULAN', 'KANAL BAYAR', 'WAKTU BAYAR (WIB)', 'NO. REFERENSI'])
+            ws.append([1, datetime(2026, 10, 14), datetime(2026, 10, 15),
+                       'A', 'I', 1, 'Nama Kasda', 300000, 0, 10000, 310000,
+                       'Oktober 2026', 'QRIS', '14-10-2026 23:59:59', '000000LATE01'])
+            payload = BytesIO()
+            kasda.save(payload)
+            payload.seek(0)
+            bank = pd.DataFrame([{'Narasi': 'ESB-V001-LATE01 Payment QRIS RETRIBUSI',
+                                  'Posting Date': '14 Oct 2026', 'Credit Transaction': 310000,
+                                  'Debit Transaction': ''}])
+            detected, manual, audit = app.process_bank_sources(bank, payload)
+            self.assertTrue(manual.empty)
+            self.assertEqual(audit.iloc[0]['Waktu_Bayar_Kasda'], '23:59:59')
+            eligible, manual = app.filter_incomplete_data(detected, manual, ['2026'])
+            extracted = app.extract_from_master_excel(eligible, {'2026': str(source)})
+            eligible, manual = app.filter_unmatched_master(extracted, manual)
+            self.assertTrue(manual.empty)
+            final = app.calculate_denda(eligible)
+            valid, results = app.input_to_excel_master(final, {'2026': str(source)}, str(root / 'first'))
+            self.assertEqual((results['success'], results['failed']), (1, 0))
+            updated_path = Path(results['backup_files']['2026'])
+            updated = openpyxl.load_workbook(updated_path)['CIGUGUR']
+            self.assertEqual(updated['CU3'].value, 'Penghuni Master')
+            self.assertEqual(updated['CY3'].value, 10000)
+            self.assertEqual(updated['DA3'].value, 'QRIS')
+            self.assertEqual(updated['DB3'].value, datetime(2026, 10, 14))
+            report = app.create_export_excel(results, valid, final, manual, audit, str(root / 'first'))
+            status = openpyxl.load_workbook(report)['Status_Input']
+            headers = {c.value: c.column for c in status[1]}
+            self.assertEqual(status.cell(2, headers['Status_Input']).value, 'Berhasil Input')
+            _, replay = app.input_to_excel_master(final, {'2026': str(updated_path)}, str(root / 'second'))
+            self.assertEqual((replay['success'], replay['skipped'], replay['failed']), (0, 1, 0))
+            self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), original_hash)
+
     def test_status_review_rule_keeps_only_plain_success_normal(self):
         cases = [
             ('Berhasil Input', 'Data berhasil diinput ke LG  row 273', False),
